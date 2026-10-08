@@ -7,7 +7,7 @@ import streamlit as st
 
 st.set_page_config(
     page_title="Herramienta de Extracción de Datos de Fichas Técnicas 🧪",
-    page_icon="CRSCOLABS.png",
+    page_icon="CRSCO.png",
     layout="wide"
 )
 
@@ -15,11 +15,11 @@ st.set_page_config(
 col1, col2 = st.columns([1, 6])
 
 with col1:
-    st.image("CRSCOLABS.png", width=120)
+    st.image("CRSCO.png", width=120)
 
 with col2:
     st.title("Herramienta de Extracción de Datos de Fichas Técnicas 🧪")
-    st.caption("CRSCOLABS")
+    st.caption("CRSCO")
 
 st.divider()
 
