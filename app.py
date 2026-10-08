@@ -240,7 +240,7 @@ with st.sidebar:
     st.divider()
     st.header('📁Archivos')
     template=st.file_uploader('Excel de fichas técnicas', type=['xlsx'])
-    centro=st.text_input('Centro de salud', type=['Opcional'])
+    centro=st.text_input('Centro de salud')
     st.info('La herramienta no genera un PDF. Usa el PDF/documento como fuente y actualiza una copia del Excel.')
 
 pdf=st.file_uploader('1. Carga la derivación', type=['pdf'], help='PDF con la información del examen.')
