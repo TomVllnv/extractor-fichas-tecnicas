@@ -4,7 +4,7 @@ import streamlit as st
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 
-APP_TITLE = 'Extractor de Fichas Técnicas'
+APP_TITLE = 'Herramienta de Extracción de Datos de Fichas Técnicas'
 
 FIELD_ALIASES = {
     'Código': ['codigo examen','codigo','código examen','código'],
