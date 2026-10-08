@@ -5,25 +5,15 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 import streamlit as st
 
-st.set_page_config(
-    page_title="Herramienta de Extracción de Datos de Fichas Técnicas 🧪",
-    page_icon="CRSCO.png",
-    layout="wide"
-)
+APP_TITLE = 'Herramienta de Extracción de Datos de Fichas Técnicas 🧪'
 
-# Encabezado
-col1, col2 = st.columns([1, 6])
+# Logo centrado
+col_izq, col_centro, col_der = st.columns([1, 2, 1])
 
-with col1:
-    st.image("CRSCO.png", width=250)
-
-with col2:
-    st.title("Herramienta de Extracción de Datos de Fichas Técnicas 🧪")
-    st.caption("CRSCO")
+with col_centro:
+    st.image("CRSCO.png", width=500)
 
 st.divider()
-
-APP_TITLE = 'Herramienta de Extracción de Datos de Fichas Técnicas 🧪'
 
 FIELD_ALIASES = {
     'Código': ['codigo examen','codigo','código examen','código'],
