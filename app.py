@@ -4,7 +4,7 @@ import streamlit as st
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 
-APP_TITLE = 'Herramienta de Extracción de Datos de Fichas Técnicas'
+APP_TITLE = 'Herramienta de Extracción de Datos de Fichas Técnicas 🧪'
 
 FIELD_ALIASES = {
     'Código': ['codigo examen','codigo','código examen','código'],
@@ -227,7 +227,7 @@ def process(uploaded_bytes, filename, template_bytes, centro=''):
     return out.getvalue(), data, target, score, reason, method, text
 
 st.set_page_config(page_title=APP_TITLE, page_icon='🧪', layout='wide')
-st.title('🧪 Extractor de Fichas Técnicas')
+st.title('Herramienta de Extracción de Datos de Fichas Técnicas 🧪')
 st.caption('Prototipo: documento de derivación → extracción → revisión → Excel')
 
 with st.sidebar:
