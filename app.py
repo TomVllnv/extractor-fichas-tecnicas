@@ -15,15 +15,13 @@ st.set_page_config(
 col1, col2 = st.columns([1, 6])
 
 with col1:
-    st.image("CRSCO.png", width=120)
+    st.image("CRSCO.png", width=250)
 
 with col2:
     st.title("Herramienta de Extracción de Datos de Fichas Técnicas 🧪")
     st.caption("CRSCO")
 
 st.divider()
-
-APP_TITLE = 'Herramienta de Extracción de Datos de Fichas Técnicas 🧪'
 
 FIELD_ALIASES = {
     'Código': ['codigo examen','codigo','código examen','código'],
