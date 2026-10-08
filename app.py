@@ -237,12 +237,10 @@ with st.sidebar:
 
     with col_logo:
         st.image("CRSCO.png", width=240)
-
     st.divider()
-    
     st.header('📁Archivos')
     template=st.file_uploader('Excel de fichas técnicas', type=['xlsx'])
-    centro=st.text_input('Centro de salud')
+    centro=st.text_input('Centro de salud', type=['Opcional'])
     st.info('La herramienta no genera un PDF. Usa el PDF/documento como fuente y actualiza una copia del Excel.')
 
 pdf=st.file_uploader('1. Carga la derivación', type=['pdf'], help='PDF con la información del examen.')
