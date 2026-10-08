@@ -7,7 +7,7 @@ import streamlit as st
 
 APP_TITLE = 'Herramienta de Extracción de Datos de Fichas Técnicas 🧪'
 
-col1 = st.columns([1.5])
+col1 = st.columns([1.5, 1])
 
 with col1:
     st.image("CRSCO.png", width=250)
