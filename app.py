@@ -7,16 +7,6 @@ import streamlit as st
 
 APP_TITLE = 'Herramienta de Extracción de Datos de Fichas Técnicas 🧪'
 
-col1, col2 = st.columns([1.5, 5])
-
-with col1:
-    st.image("CRSCO.png", width=240)
-
-with col2:
-    st.title("")
-
-st.divider()
-
 FIELD_ALIASES = {
     'Código': ['codigo examen','codigo','código examen','código'],
     'Nombre LIS': ['nombre lis','nombre del examen','examen','nombre examen'],
@@ -242,9 +232,14 @@ st.title('Herramienta de Extracción de Datos de Fichas Técnicas 🧪')
 st.caption('Prototipo: documento de derivación → extracción → revisión → Excel')
 
 with st.sidebar:
-    st.header('Archivos')
+    # Logo de CRSCO
+    st.image("CRSCO.png", width=200)
+
+    st.divider()
+    
+    st.header('📁Archivos')
     template=st.file_uploader('Excel de fichas técnicas', type=['xlsx'])
-    centro=st.text_input('Centro de salud (opcional)')
+    centro=st.text_input('Centro de salud')
     st.info('La herramienta no genera un PDF. Usa el PDF/documento como fuente y actualiza una copia del Excel.')
 
 pdf=st.file_uploader('1. Carga la derivación', type=['pdf'], help='PDF con la información del examen.')
