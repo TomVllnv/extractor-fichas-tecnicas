@@ -23,6 +23,8 @@ with col2:
 
 st.divider()
 
+APP_TITLE = 'Herramienta de Extracción de Datos de Fichas Técnicas 🧪'
+
 FIELD_ALIASES = {
     'Código': ['codigo examen','codigo','código examen','código'],
     'Nombre LIS': ['nombre lis','nombre del examen','examen','nombre examen'],
