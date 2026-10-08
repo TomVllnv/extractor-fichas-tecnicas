@@ -233,7 +233,10 @@ st.caption('Prototipo: documento de derivación → extracción → revisión �
 
 with st.sidebar:
     # Logo de CRSCO
-    st.image("CRSCO.png", width=200)
+    col_izq, col_logo, col_der = st.columns([1, 2, 1])
+
+    with col_logo:
+        st.image("CRSCO.png", width=240)
 
     st.divider()
     
