@@ -3,6 +3,25 @@ from datetime import datetime
 import streamlit as st
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
+import streamlit as st
+
+st.set_page_config(
+    page_title="Herramienta de Extracción de Datos de Fichas Técnicas 🧪",
+    page_icon="CRSCOLABS.png",
+    layout="wide"
+)
+
+# Encabezado
+col1, col2 = st.columns([1, 6])
+
+with col1:
+    st.image("CRSCOLABS.png", width=120)
+
+with col2:
+    st.title("Herramienta de Extracción de Datos de Fichas Técnicas 🧪")
+    st.caption("CRSCOLABS")
+
+st.divider()
 
 APP_TITLE = 'Herramienta de Extracción de Datos de Fichas Técnicas 🧪'
 
