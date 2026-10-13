@@ -240,7 +240,7 @@ def check_login():
     if st.session_state["authenticated"]:
         return True
 
-    st.title("🔐 Acceso a la herramienta")
+    st.title("Acceso a la herramienta")
     st.caption("Ingresa tus credenciales para continuar.")
     with st.form("login_form", clear_on_submit=False):
         username = st.text_input("Usuario")
