@@ -5,10 +5,10 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 
-APP_TITLE = 'Herramienta de Extracción de Datos de Fichas Técnicas'
+APP_TITLE = '+Herramienta de Extracción de Datos de Fichas Técnicas'
 
 FIELD_ALIASES = {
-    'Código': ['Código BK','codigo examen','codigo','código examen','código', 'Código del Examen'],
+    'Código': ['BK','Código BK','codigo examen','codigo','código examen','código', 'Código del Examen'],
     'Nombre LIS': ['Derivación','nombre del examen','examen','nombre examen', 'Nombres del Examen'],
     'Laboratorio de procesamiento': ['laboratorio de procesamiento','laboratorio'],
     'Recepción de muestras': ['recepcion de muestras','recepción de muestras','recepcion'],
