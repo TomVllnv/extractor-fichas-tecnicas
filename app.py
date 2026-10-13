@@ -590,7 +590,6 @@ with tab_extractor:
 
         st.caption("""
         Verde: se encontró información. 
-        
         Amarillo: no se encontró información; revisa el documento original.
         """)
         st.dataframe(
