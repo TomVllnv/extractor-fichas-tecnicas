@@ -8,7 +8,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 APP_TITLE = 'Herramienta de Extracción de Datos de Fichas Técnicas'
 
 FIELD_ALIASES = {
-    'Código': ['codigo examen','codigo','código examen','código', 'Código del Examen', 'Codigo BK'],
+    'Código': ['codigo examen','codigo','código examen','código', 'Código del Examen', 'Código BK'],
     'Nombre LIS': ['Derivación','nombre del examen','examen','nombre examen', 'Nombres del Examen'],
     'Laboratorio de procesamiento': ['laboratorio de procesamiento','laboratorio'],
     'Recepción de muestras': ['recepcion de muestras','recepción de muestras','recepcion'],
