@@ -82,16 +82,16 @@ FIELD_ALIASES = {
     'Estabilidad de la muestra': ['estabilidad muestra','estabilidad de la muestra','estabilidad'],
     'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte','condiciones de envio','condiciones de envío','envio al laboratorio','envío al laboratorio','transporte'],
     'Método de procesamiento': ['metodo utilizado','método utilizado','metodo de procesamiento','método de procesamiento','metodologia','metodología','metodo'],
-    'Test incluidos ': ['test incluidos','pruebas incluidas','examenes incluidos','exámenes incluidos'],
+    'Test incluidos': ['test incluidos','pruebas incluidas','examenes incluidos','exámenes incluidos'],
     'Valores de referencia': ['valor de referencia','valores de referencia','valores normales','rango de referencia'],
     'Valor crítico': ['valor critico','valor crítico','valores criticos','valores críticos'],
-    'Límite de detección ': ['limite de deteccion','límite de detección','limite deteccion','límite deteccion'],
+    'Límite de detección': ['limite de deteccion','límite de detección','limite deteccion','límite deteccion'],
     'Equipamiento utilizado': ['equipamiento utilizado','equipo utilizado','instrumentacion','instrumentación','equipo'],
     'Información clínica': ['utilidad clinica','utilidad clínica','informacion clinica','información clínica','informacion clínica'],
-    'Referencias ': ['referencias','bibliografia','bibliografía','fuentes'],
-    'Actualizado por:': ['actualizado por'],
-    'Fecha actualización:': ['fecha actualizacion','fecha actualización','fecha de actualización'],
-    'Autorizado por:': ['autorizado por'],
+    'Referencias': ['referencias','bibliografia','bibliografía','fuentes'],
+    'Actualizado por': ['actualizado por'],
+    'Fecha actualización': ['fecha actualizacion','fecha actualización','fecha de actualización'],
+    'Autorizado por': ['autorizado por'],
 }
 
 def norm(s):
