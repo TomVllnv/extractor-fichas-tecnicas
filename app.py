@@ -567,7 +567,6 @@ with st.sidebar:
 tab_pdf, tab_export, tab_guide = st.tabs([
     "Extraer información desde un PDF",
     "Exportar a otro formato",
-    "Base maestra",
     "Guía de desarrollo seguro",
 ])
 
@@ -748,7 +747,7 @@ with tab_pdf:
         st.subheader("Descargar Excel actualizado")
         st.write("La pestaña de extracción PDF descarga únicamente el libro Excel actualizado en formato XLSX, conservando sus hojas y añadiendo la hoja «Nueva Derivación».")
         st.download_button(
-            "⬇️ Descargar Excel actualizado (.xlsx)",
+            "Descargar Excel actualizado (.xlsx)",
             data=out,
             file_name="Fichas_tecnicas_actualizadas.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -787,7 +786,7 @@ with tab_export:
                 template.getvalue(), imported_format, selected_import_sheet
             )
             st.download_button(
-                f"⬇️ Descargar Excel importado en {imported_format}",
+                f"Descargar Excel importado en {imported_format}",
                 data=imported_bytes,
                 file_name=imported_name,
                 mime=imported_mime,
