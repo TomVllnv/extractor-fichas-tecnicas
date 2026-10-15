@@ -685,7 +685,7 @@ with tab_pdf:
     centro = seleccion_laboratorio or ""
     st.caption("El laboratorio seleccionado se incorporará al campo «Laboratorio de procesamiento» de la ficha identificada. Este dato no se obtiene del PDF.")
     pdf = st.file_uploader(
-        "Carga la derivación",
+        "Cargar ficha técnica",
         type=["pdf"],
         help="PDF con la información del examen.",
         key="pdf_uploader",
@@ -705,7 +705,7 @@ with tab_pdf:
                 except Exception as e:
                     st.error(f"No se pudo analizar el documento: {e}")
     elif not template or not pdf:
-        st.info("Selecciona una derivación PDF y luego carga el Excel de fichas técnicas desde el menú lateral.")
+        st.info("Selecciona una ficha técnica en formato PDF.")
 
     if "result" in st.session_state:
         out, data, target, score, reason, method, extracted_text = st.session_state["result"]
