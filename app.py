@@ -628,7 +628,7 @@ with tab_pdf:
                    if st.session_state["laboratorio_selector_widget"] in laboratorios else None),
             key="laboratorio_selector_widget",
             placeholder="Selecciona un laboratorio",
-            help="Selecciona un laboratorio existente. Usa + para agregar uno o − para eliminarlo.",
+            help="Ingresa un laboratorio existente. Usa + para agregar uno o − para eliminarlo.",
         )
     with col_add:
         st.button("+", key="add_lab_button", help="Añadir laboratorio", use_container_width=True,
