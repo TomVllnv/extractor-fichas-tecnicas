@@ -705,7 +705,7 @@ with tab_pdf:
                 except Exception as e:
                     st.error(f"No se pudo analizar el documento: {e}")
     elif not template or not pdf:
-        st.info("Carga el Excel de fichas técnicas desde el menú lateral y luego selecciona una derivación PDF.")
+        st.info("Selecciona una derivación PDF y luego carga el Excel de fichas técnicas desde el menú lateral.")
 
     if "result" in st.session_state:
         out, data, target, score, reason, method, extracted_text = st.session_state["result"]
