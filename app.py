@@ -566,7 +566,8 @@ with st.sidebar:
 
 tab_pdf, tab_export, tab_guide = st.tabs([
     "Extraer información desde un PDF",
-    "Exportar a Excel importado",
+    "Exportar a otro formato",
+    "Base maestra",
     "Guía de desarrollo seguro",
 ])
 
@@ -758,7 +759,7 @@ with tab_pdf:
             st.text_area("Texto", extracted_text, height=350, key="raw_extracted_text")
 
 with tab_export:
-    st.subheader("Exportar a Excel importado")
+    st.subheader("Exportar a otro formato")
     st.write("Esta pestaña permite exportar el libro Excel cargado en distintos formatos. Es independiente del procesamiento del PDF.")
     if template:
         try:
