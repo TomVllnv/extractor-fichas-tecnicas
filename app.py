@@ -72,7 +72,7 @@ def guardar_laboratorio(nombre):
 
 FIELD_ALIASES = {
     'Código': ['codigo examen','codigo','código examen','código', 'Código del Examen'],
-    'Nombre LIS': ['Derivación','nombre del examen','examen','nombre examen', 'Nombres del Examen'],
+    'Nombre LIS': ['Nombre LIS','Derivación','nombre del examen','examen','nombre examen', 'Nombres del Examen'],
     'Laboratorio de procesamiento': ['laboratorio de procesamiento','laboratorio'],
     'Recepción de muestras': ['recepcion de muestras','recepción de muestras','recepcion'],
     'Procesamiento de muestras': ['procesamiento de muestras','procesamiento de muetsras','procesamiento'],
@@ -80,7 +80,7 @@ FIELD_ALIASES = {
     'Preparación del paciente': ['preparacion paciente','preparación paciente','preparacion del paciente','preparación del paciente'],
     'Muestra requerida': ['tipo de muestra','muestra requerida','muestra','tipo y volumen de muestra','material biologico','material biológico','volumen requerido'],
     'Estabilidad de la muestra': ['estabilidad muestra','estabilidad de la muestra','estabilidad'],
-    'Condiciones de envío al Laboratorio': ['temperatura de transporte','condiciones de envio','condiciones de envío','envio al laboratorio','envío al laboratorio','transporte'],
+    'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte','condiciones de envio','condiciones de envío','envio al laboratorio','envío al laboratorio','transporte'],
     'Método de procesamiento': ['metodo utilizado','método utilizado','metodo de procesamiento','método de procesamiento','metodologia','metodología','metodo'],
     'Test incluidos ': ['test incluidos','pruebas incluidas','examenes incluidos','exámenes incluidos'],
     'Valores de referencia': ['valor de referencia','valores de referencia','valores normales','rango de referencia'],
