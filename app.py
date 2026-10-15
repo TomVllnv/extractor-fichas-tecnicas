@@ -737,7 +737,8 @@ with tab_pdf:
                 return ["background-color: #B7F7C1; color: #124D20; font-weight: bold"] * len(row)
             return ["background-color: #FFF0B3; color: #6B4D00"] * len(row)
 
-        st.caption("Verde: dato encontrado o ingresado por el usuario. Amarillo: dato no encontrado o pendiente de ingreso.")
+        st.caption("""Verde: dato encontrado o ingresado por el usuario. 
+        Amarillo: dato no encontrado o pendiente de ingreso.""")
         st.dataframe(
             df.style.apply(highlight_found, axis=1),
             use_container_width=True,
