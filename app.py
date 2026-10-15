@@ -10,7 +10,7 @@ APP_TITLE = 'Herramienta de Extracción de Datos de Fichas Técnicas'
 LABORATORIOS_PREDETERMINADOS = [
     "Redlab",
     "Barnafi Krause",
-    "Complejo Hospitalario Dr. Sótero del Río (Santiago, Puente Alto)",
+    "Complejo Hospitalario Dr. Sótero del Río",
     "Dr. Luis Calvo Mackenna",
 ]
 LABORATORIOS_FILE = "laboratorios.json"
