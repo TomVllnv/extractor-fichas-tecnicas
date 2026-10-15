@@ -712,8 +712,11 @@ with tab_pdf:
         filename = st.session_state.get("filename", "documento.pdf")
         centro_result = st.session_state.get("centro", "")
         st.subheader("Resultado de extracción")
-        c1 = st.columns(1)
+        c1, c2, c3 = st.columns(3)
         c1.metric("Campos encontrados", sum(bool(v) for v in data.values()))
+        c2.metric("Método", method)
+        c3.metric("Ficha identificada", target[:25] if target else "No encontrada")
+        st.write("**Coincidencia:**", reason, f"({score:.0%})" if score else "")
 
         rows = []
         for field in FIELD_ALIASES:
