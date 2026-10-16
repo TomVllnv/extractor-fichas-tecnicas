@@ -274,10 +274,22 @@ def process(uploaded_bytes, filename, template_bytes, centro=''):
         target=ws.title
     else:
         target='Sin modificación'
-    # Añade una hoja de apoyo con los datos extraídos, sin encabezados ni columnas de estado/documento.
-    if 'Nueva Derivación' in wb.sheetnames:
-        del wb['Nueva Derivación']
-    log=wb.create_sheet('Nueva Derivación')
+
+ # Obtener el valor del campo 'Nombre LIS' extraído por la herramienta
+    nombre_lis = data.get('Nombre LIS', '').strip()
+    
+    # Limpiar caracteres prohibidos en pestañas de Excel: \ / ? * : [ ]
+    nombre_hoja_limpio = re.sub(r"[\*\\/\?\:\[\]]", "", str(nombre_lis))
+    
+    # Forzar el límite estricto de Excel de 31 caracteres máximos
+    nombre_hoja_final = nombre_hoja_limpio[:31].strip()
+
+    # Eliminar la hoja si ya existe para evitar duplicados, y crearla con el Nombre LIS
+    if nombre_hoja_final in wb.sheetnames:
+        del wb[nombre_hoja_final]
+    log = wb.create_sheet(nombre_hoja_final)
+    # -----------------------------------------------
+    
     for field in FIELD_ALIASES:
         log.append([field.strip(), data.get(field, '')])
     for row in log.iter_rows():
@@ -288,7 +300,6 @@ def process(uploaded_bytes, filename, template_bytes, centro=''):
     # Save
     out=io.BytesIO(); wb.save(out); out.seek(0)
     return out.getvalue(), data, target, score, reason, method, text
-
 
 # --- Acceso básico (adecuado solo para prototipo/pruebas) ---
 DEFAULT_USERNAME = "CRSCODUOC"
