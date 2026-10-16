@@ -626,7 +626,7 @@ with tab_pdf:
             help="Ingresa un laboratorio existente.",
         )
 
-    col_add, col_remove, col_info, col_espacio = st.columns([0.50, 0.50, 0.5, 8.6])
+    col_add, col_remove, col_info, col_espacio = st.columns([0.55, 0.55, 0.5, 8.6])
 
     with col_add:
         st.button("➕", key="add_lab_button", help="Añadir laboratorio", use_container_width=True,
