@@ -81,7 +81,7 @@ FIELD_ALIASES = {
     'Procedimiento de toma de muestas': ['Procedimiento','Procedimiento de toma de muestras','Procedimiento de examen','Procedimiento del examen'],
     'Muestra requerida y recipiente': ['tipo de muestra','muestra requerida','muestra','tipo y volumen de muestra','material biologico','material biológico','volumen requerido'],
     'Rotulación':['Rotulación','Rotulacion'],
-    'Estabilidad de la muestra': ['estabilidad muestra','estabilidad de la muestra','estabilidad'],
+    'Estabilidad de la muestra': ['estabilidad muestra','estabilidad de la muestra','estabilidad','Conservación y estabilidad'],
     'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte','condiciones de envio','condiciones de envío','envio al laboratorio','envío al laboratorio','transporte'],
     'Criterios de rechazo': ['Rechazo','Criterios de rechazo','Criterios rechazo','Criterios del rechazo'],
     'Método de procesamiento': ['metodo utilizado','método utilizado','metodo de procesamiento','método de procesamiento','metodologia','metodología','metodo'],
