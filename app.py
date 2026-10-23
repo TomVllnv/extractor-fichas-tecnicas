@@ -395,7 +395,7 @@ FIELD_ALIASES_POR_AREA = {
                                     'principio de la prueba'],
         'Test incluidos': ['test incluidos', 'pruebas incluidas', 'fórmula leucocitaria', 'recuento de plaquetas',
                            'índices eritrocitarios'],
-        'Valores de referencia': ['Valores treóricos', 'Expected values', ' Reference intervals', 'valor de referencia', 'valores de referencia', 'valores normales',
+        'Valores de referencia': ['Valores teóricos', 'Expected values', 'Reference intervals', 'Valores treóricos', 'Expected values', ' Reference intervals', 'valor de referencia', 'valores de referencia', 'valores normales',
                                   'rangos hematológicos'],
         'Valor crítico': ['valor critico', 'valor crítico', 'plaquetopenia severa', 'blastos en frotis'],
         'Límite de detección': ['Limites e intervalos', 'Measuring range', 'limite de deteccion', 'límite de detección', 'límite de cuantificación',
