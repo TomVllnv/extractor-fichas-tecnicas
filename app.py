@@ -752,7 +752,8 @@ def process(uploaded_bytes, filename, template_bytes, centro='', nombre_examen='
     text, method = extract_pdf_text(uploaded_bytes, filename, nombre_examen)
     data = infer_name_code(text, parse_labeled_text(text, field_aliases, nombre_examen))
 
-    fecha_actual = datetime.now().strftime('%d/%m/%Y %H:%M')
+    ZONA_HORARIA = ZoneInfo("America/Santiago")
+    fecha_actual = datetime.now(ZONA_HORARIA).strftime('%d/%m/%Y %H:%M')
 
     # Asignar explícitamente los campos metadata elegidos por el usuario y la fecha actual
     data['Nombre LIS'] = nombre_examen.strip()
@@ -804,7 +805,7 @@ def process(uploaded_bytes, filename, template_bytes, centro='', nombre_examen='
         del wb[log_name]
     log = wb.create_sheet(log_name)
     log.append(['Área', 'Examen seleccionado', 'Documento', 'Método de extracción', 'Fecha de procesamiento'])
-    log.append(['', nombre_examen, filename, method, datetime.now().strftime('%Y-%m-%d %H:%M:%S')])
+    log.append(['', nombre_examen, filename, method, datetime.now(ZONA_HORARIA).strftime('%Y-%m-%d %H:%M:%S')])
     log.append([])
     log.append(['Campo', 'Información extraída'])
     for field in field_aliases:
