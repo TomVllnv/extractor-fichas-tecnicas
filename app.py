@@ -380,7 +380,7 @@ FIELD_ALIASES_POR_AREA = {
                                      'tiempo procesamiento'],
         'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'preparacion del paciente',
                                      'ayuno previo'],
-        'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'punción venosa'],
+        'Procedimiento de toma de muestras': ['Obtención y preparación de las muestras', 'Specimen collection and preparation', 'Procedimiento', 'Procedimiento de toma de muestras', 'punción venosa'],
         'Muestra requerida y recipiente': ['Specimen collection and preparation', 'tipo de muestra', 'muestra requerida', 'tubo edta', 'tubo tapa morada',
                                            'sangre total', 'obtencion y preparacion de las muestras',
                                            'obtención y preparación de las muestras'],
