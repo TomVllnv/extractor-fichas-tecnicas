@@ -132,7 +132,7 @@ def guardar_encargados(tipo, lista):
 
 AREA_CONFIG = {
     "Microbiología": {"template": "plantilla_microbiologia.xlsx"},
-    "Hematología": {"template": "plantilla_hematologia.xlsx"},
+    "Hematología y coagulación": {"template": "plantilla_hematologia.xlsx"},
     "Bioquímica": {"template": "plantilla_bioquimica.xlsx"},
     "Hormonas e inmunidad": {"template": None},
 }
