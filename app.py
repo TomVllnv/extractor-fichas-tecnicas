@@ -1,4 +1,4 @@
-import io, os, re, tempfile, subprocess, shutil, csv, json, hashlib, copy, xml.etree.ElementTree as ET
+import io, os, re, tempfile, subprocess, shutil, csv, json, hashlib, copy, base64, xml.etree.ElementTree as ET
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import openpyxl
@@ -132,9 +132,10 @@ def guardar_encargados(tipo, lista):
 
 AREA_CONFIG = {
     "Microbiología": {"template": "plantilla_microbiologia.xlsx"},
-    "Hematología": {"template": "plantilla_hematologia.xlsx"},
+    "Hematología y coagulación": {"template": "plantilla_hematologia.xlsx"},
     "Bioquímica": {"template": "plantilla_bioquimica.xlsx"},
     "Hormonas e inmunidad": {"template": None},
+    "Derivados": {"template": None},
 }
 EXAMENES_FILE = os.path.join(os.path.dirname(__file__), "examenes_por_area.json")
 
@@ -147,10 +148,7 @@ def cargar_examenes_por_area():
             guardados = json.load(f)
     except (OSError, json.JSONDecodeError):
         guardados = None
-    resultado = {area: list(guardados.get(area, [])) for area in AREA_CONFIG} if isinstance(guardados, dict) else {a: []
-                                                                                                                   for a
-                                                                                                                   in
-                                                                                                                   AREA_CONFIG}
+    resultado = {area: list(guardados.get(area, [])) for area in AREA_CONFIG} if isinstance(guardados, dict) else {a: [] for a in AREA_CONFIG}
     for area, config in AREA_CONFIG.items():
         ruta = os.path.join(os.path.dirname(__file__), config["template"] or "")
         if config["template"] and os.path.exists(ruta) and not (isinstance(guardados, dict) and area in guardados):
@@ -160,8 +158,7 @@ def cargar_examenes_por_area():
                 wb.close()
             except Exception:
                 resultado[area] = []
-    return {a: sorted(list(dict.fromkeys(str(x).strip() for x in xs if str(x).strip())), key=str.casefold) for a, xs in
-            resultado.items()}
+    return {a: sorted(list(dict.fromkeys(str(x).strip() for x in xs if str(x).strip())), key=str.casefold) for a, xs in resultado.items()}
 
 
 def guardar_examenes_por_area(examenes):
@@ -214,25 +211,15 @@ def convertir_subindices(texto):
 
 
 def quitar_citas_superindices(texto):
-    """Elimina citas bibliográficas de superíndices (ej: 'hígado.1', 'embarazo3,4')
-
-    sin afectar cifras decimales (3.2 %, 0.109 M) ni cantidades operativas.
-    """
+    """Elimina citas bibliográficas de superíndices sin afectar cifras decimales."""
     if not texto:
         return ""
 
     s = str(texto)
-    # 1. Citas explícitas entre corchetes o paréntesis tipo [1], [1,2], (15)
     s = re.sub(r"\[\d+(?:\s*,\s*\d+)*\]", "", s)
     s = re.sub(r"\(\d+(?:\s*,\s*\d+)*\)", "", s)
-
-    # 2. Citas pegadas directamente a una letra (ej: "embarazo3,4", "fase aguda2")
     s = re.sub(r"(?<=[a-zA-ZáéíóúñÁÉÍÓÚÑ])\d+(?:\s*,\s*\d+)*(?=\s|[.,;:!?\n]|$)", "", s)
-
-    # 3. Citas pegadas a puntuación que está PRECEDIDA POR UNA LETRA (ej: "hígado.1", "trombóticas.11,12")
     s = re.sub(r"(?<=[a-zA-ZáéíóúñÁÉÍÓÚÑ][.,;:])\d+(?:\s*,\s*\d+)*(?=\s|[.,;:!?\n]|$)", "", s)
-
-    # 4. Limpieza de espacios dobles y comas descolgadas
     s = re.sub(r"\s+([.,;:])", r"\1", s)
     s = re.sub(r"^\s*,\s*", "", s, flags=re.MULTILINE)
     s = re.sub(r"[ \t]+", " ", s)
@@ -261,20 +248,37 @@ def es_linea_basura_o_encabezado(s, examen_activo=None):
 
 
 def limpiar_valor_excel(valor, examen_activo=None):
-    """Quita espacios accidentales, líneas de ruido, citas bibliográficas y conserva saltos útiles."""
+    """Quita espacios accidentales, líneas de ruido y citas bibliográficas conservando valores válidos."""
     if valor is None:
         return ""
+
+    valor_str = str(valor).strip()
+    if not valor_str:
+        return ""
+
+    if examen_activo and valor_str.casefold() == str(examen_activo).strip().casefold():
+        return valor_str
 
     valor_sin_citas = quitar_citas_superindices(valor)
     lineas = [re.sub(r"[ \t]+", " ", linea).strip() for linea in valor_sin_citas.replace("\r", "").split("\n")]
     salida = []
     blancos = 0
     for linea in lineas:
-        if not linea or es_linea_basura_o_encabezado(linea, examen_activo):
+        if not linea:
             blancos += 1
             if blancos == 1 and salida:
                 salida.append("")
             continue
+
+        if es_linea_basura_o_encabezado(linea, examen_activo):
+            if examen_activo and linea.casefold() == str(examen_activo).strip().casefold() and len(lineas) == 1:
+                salida.append(linea)
+                continue
+            blancos += 1
+            if blancos == 1 and salida:
+                salida.append("")
+            continue
+
         blancos = 0
         if re.fullmatch(r"https?://\S+|www\.\S+", linea, flags=re.I):
             continue
@@ -282,87 +286,55 @@ def limpiar_valor_excel(valor, examen_activo=None):
     return convertir_subindices("\n".join(salida).strip())
 
 
-# Estructura base de respaldo
 FIELD_ALIASES_BASE = {
     'Código': ['codigo examen', 'codigo', 'código examen', 'código', 'Código del Examen'],
     'Nombre LIS': ['Nombre LIS', 'Derivación', 'nombre del examen', 'examen', 'nombre examen', 'Nombres del Examen'],
     'Laboratorio de procesamiento': ['laboratorio de procesamiento', 'laboratorio'],
     'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion'],
     'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento de muetsras', 'procesamiento'],
-    'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat',
-                                 'tiempo procesamiento'],
-    'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'preparacion del paciente',
-                                 'preparación del paciente'],
-    'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras',
-                                          'Procedimiento de examen', 'Procedimiento del examen'],
-    'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'muestra', 'tipo y volumen de muestra',
-                                       'material biologico', 'material biológico', 'volumen requerido',
-                                       'obtencion y preparacion de las muestras',
-                                       'obtención y preparación de las muestras'],
+    'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat', 'tiempo procesamiento'],
+    'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'preparacion del paciente', 'preparación del paciente'],
+    'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'Procedimiento de examen', 'Procedimiento del examen'],
+    'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'muestra', 'tipo y volumen de muestra', 'material biologico', 'material biológico', 'volumen requerido', 'obtencion y preparacion de las muestras', 'obtención y preparación de las muestras'],
     'Rotulación': ['Rotulación', 'Rotulacion'],
-    'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'Conservación y estabilidad',
-                                  'conservacion y estabilidad'],
-    'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte',
-                                            'condiciones de envio', 'condiciones de envío', 'envio al laboratorio',
-                                            'envío al laboratorio', 'transporte'],
+    'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'Conservación y estabilidad', 'conservacion y estabilidad'],
+    'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte', 'condiciones de envio', 'condiciones de envío', 'envio al laboratorio', 'envío al laboratorio', 'transporte'],
     'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'Criterios rechazo', 'Criterios del rechazo'],
-    'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'metodo de procesamiento',
-                                'método de procesamiento', 'metodologia', 'metodología', 'metodo', 'principio del test',
-                                'principio', 'principio de la prueba', 'principio del ensayo'],
+    'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'metodo de procesamiento', 'método de procesamiento', 'metodologia', 'metodología', 'metodo', 'principio del test', 'principio', 'principio de la prueba', 'principio del ensayo'],
     'Test incluidos': ['test incluidos', 'pruebas incluidas', 'examenes incluidos', 'exámenes incluidos'],
-    'Valores de referencia': ['valor de referencia', 'valores de referencia', 'valores normales',
-                              'rango de referencia'],
+    'Valores de referencia': ['valor de referencia', 'valores de referencia', 'valores normales', 'rango de referencia'],
     'Valor crítico': ['valor critico', 'valor crítico', 'valores criticos', 'valores críticos'],
-    'Límite de detección': ['limite de deteccion', 'límite de detección', 'limite deteccion', 'límite deteccion',
-                            'límite de cuantificación', 'limite de cuantificacion', 'loq'],
-    'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'instrumentacion', 'instrumentación',
-                               'equipo', 'system', 'sistema', 'informacion del sistema', 'información del sistema'],
-    'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'utilidad clínica',
-                            'informacion clinica', 'información clínica'],
+    'Límite de detección': ['limite de deteccion', 'límite de detección', 'limite deteccion', 'límite deteccion', 'límite de cuantificación', 'limite de cuantificacion', 'loq'],
+    'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'instrumentacion', 'instrumentación', 'equipo', 'system', 'sistema', 'informacion del sistema', 'información del sistema'],
+    'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'utilidad clínica', 'informacion clinica', 'información clínica'],
     'Referencias': ['referencias', 'bibliografia', 'bibliografía', 'fuentes'],
     'Actualizado por': ['actualizado por'],
-    'Fecha actualización': ['fecha actualizacion', 'fecha actualización', 'fecha de actualización'],
+    'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
     'Autorizado por': ['autorizado por'],
 }
 
 FIELD_ALIASES_POR_AREA = {
     "Microbiología": {
         'Código': ['codigo examen', 'codigo', 'código examen', 'código', 'cod_micro', 'código microbiología'],
-        'Nombre LIS': ['Nombre LIS', 'Derivación', 'nombre del examen', 'examen', 'cultivo', 'agente',
-                       'microorganismo'],
-        'Laboratorio de procesamiento': ['laboratorio de procesamiento', 'laboratorio', 'sección microbiología',
-                                         'lab micro'],
+        'Nombre LIS': ['Nombre LIS', 'Derivación', 'nombre del examen', 'examen', 'cultivo', 'agente', 'microorganismo'],
+        'Laboratorio de procesamiento': ['laboratorio de procesamiento', 'laboratorio', 'sección microbiología', 'lab micro'],
         'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion', 'recepción cultivo'],
         'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'siembra', 'incubación'],
-        'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat',
-                                     'días de incubación'],
-        'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'preparacion del paciente',
-                                     'sin antibióticos previa toma'],
-        'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'toma de muestra',
-                                              'técnica aséptica', 'hisopado'],
-        'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'muestra', 'medio de transporte',
-                                           'stuart', 'frasco estéril', 'obtencion y preparacion de las muestras',
-                                           'obtención y preparación de las muestras'],
+        'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat', 'días de incubación'],
+        'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'preparacion del paciente', 'sin antibióticos previa toma'],
+        'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'toma de muestra', 'técnica aséptica', 'hisopado'],
+        'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'muestra', 'medio de transporte', 'stuart', 'frasco estéril', 'obtencion y preparacion de las muestras', 'obtención y preparación de las muestras'],
         'Rotulación': ['Rotulación', 'Rotulacion', 'etiquetado muestra'],
-        'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'conservación cultivo',
-                                      'conservacion y estabilidad', 'conservación y estabilidad'],
-        'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte',
-                                                'envio al laboratorio', 'transporte ambiente'],
+        'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'conservación cultivo', 'conservacion y estabilidad', 'conservación y estabilidad'],
+        'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte', 'envio al laboratorio', 'transporte ambiente'],
         'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'muestra contaminada', 'frasco derramado'],
-        'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'metodología', 'método',
-                                    'cultivo tradicional', 'maldi-tof', 'antibiograma', 'principio del test',
-                                    'principio', 'principio de la prueba'],
+        'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'metodología', 'método', 'cultivo tradicional', 'maldi-tof', 'antibiograma', 'principio del test', 'principio', 'principio de la prueba'],
         'Test incluidos': ['test incluidos', 'pruebas incluidas', 'tinción gram', 'identificación y antibiograma'],
-        'Valores de referencia': ['valor de referencia', 'valores de referencia', 'desarrollo bacteriano',
-                                  'sin desarrollo'],
+        'Valores de referencia': ['valor de referencia', 'valores de referencia', 'desarrollo bacteriano', 'sin desarrollo'],
         'Valor crítico': ['valor critico', 'valor crítico', 'hemocultivo positivo', 'patógeno crítico'],
-        'Límite de detección': ['limite de deteccion', 'límite de detección', 'sensibilidad analítica',
-                                'límite de cuantificación', 'limite de cuantificacion', 'loq'],
-        'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'incubadora', 'estufa',
-                                   'sistema automatizado micro', 'system', 'sistema', 'informacion del sistema',
-                                   'información del sistema'],
-        'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'utilidad clínica',
-                                'informacion clinica', 'información clínica'],
+        'Límite de detección': ['limite de deteccion', 'límite de detección', 'sensibilidad analítica', 'límite de cuantificación', 'limite de cuantificacion', 'loq'],
+        'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'incubadora', 'estufa', 'sistema automatizado micro', 'system', 'sistema', 'informacion del sistema', 'información del sistema'],
+        'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'utilidad clínica', 'informacion clinica', 'información clínica'],
         'Referencias': ['referencias', 'bibliografia', 'bibliografía'],
         'Actualizado por': ['actualizado por'],
         'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
@@ -371,39 +343,24 @@ FIELD_ALIASES_POR_AREA = {
     "Hematología": {
         'Código': ['codigo examen', 'codigo', 'código examen', 'código', 'cod_hemato', 'código hematología'],
         'Nombre LIS': ['Nombre LIS', 'Derivación', 'nombre del examen', 'examen', 'hemograma', 'recuento', 'frotis'],
-        'Laboratorio de procesamiento': ['laboratorio de procesamiento', 'laboratorio', 'sección hematología',
-                                         'lab hemato'],
+        'Laboratorio de procesamiento': ['laboratorio de procesamiento', 'laboratorio', 'sección hematología', 'lab hemato'],
         'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion', 'recepción tubo edta'],
-        'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'homogenización',
-                                      'frotis sanguíneo'],
-        'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat',
-                                     'tiempo procesamiento'],
-        'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'preparacion del paciente',
-                                     'ayuno previo'],
+        'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'homogenización', 'frotis sanguíneo'],
+        'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat', 'tiempo procesamiento'],
+        'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'preparacion del paciente', 'ayuno previo'],
         'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'punción venosa'],
-        'Muestra requerida y recipiente': ['Specimen collection and preparation', 'tipo de muestra', 'muestra requerida', 'tubo edta', 'tubo tapa morada',
-                                           'sangre total', 'obtencion y preparacion de las muestras',
-                                           'obtención y preparación de las muestras'],
+        'Muestra requerida y recipiente': ['Specimen collection and preparation', 'tipo de muestra', 'muestra requerida', 'tubo edta', 'tubo tapa morada', 'sangre total', 'obtencion y preparacion de las muestras', 'obtención y preparación de las muestras'],
         'Rotulación': ['Rotulación', 'Rotulacion'],
         'Estabilidad de la muestra': ['Estabilidad:', 'Stability:', 'estabilidad muestra', 'estabilidad de la muestra', 'estabilidad frotis'],
-        'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte',
-                                                'envio ambiente', 'sin congelar'],
+        'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte', 'envio ambiente', 'sin congelar'],
         'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'muestra coagulada', 'coágulos', 'hemólisis'],
-        'Método de procesamiento': ['Test principle', 'Assay principle', 'metodo utilizado', 'método utilizado', 'metodología', 'citometría de flujo',
-                                    'impedancia', 'microscopía', 'principio del test', 'principio',
-                                    'principio de la prueba'],
-        'Test incluidos': ['test incluidos', 'pruebas incluidas', 'fórmula leucocitaria', 'recuento de plaquetas',
-                           'índices eritrocitarios'],
-        'Valores de referencia': ['Valores teóricos', 'Expected values', 'Reference intervals', 'Valores treóricos', 'Expected values', ' Reference intervals', 'valor de referencia', 'valores de referencia', 'valores normales',
-                                  'rangos hematológicos'],
+        'Método de procesamiento': ['Test principle', 'Assay principle', 'metodo utilizado', 'método utilizado', 'metodología', 'citometría de flujo', 'impedancia', 'microscopía', 'principio del test', 'principio', 'principio de la prueba'],
+        'Test incluidos': ['test incluidos', 'pruebas incluidas', 'fórmula leucocitaria', 'recuento de plaquetas', 'índices eritrocitarios'],
+        'Valores de referencia': ['Valores teóricos', 'Expected values', 'Reference intervals', 'Valores treóricos', 'valor de referencia', 'valores de referencia', 'valores normales', 'rangos hematológicos'],
         'Valor crítico': ['valor critico', 'valor crítico', 'plaquetopenia severa', 'blastos en frotis'],
-        'Límite de detección': ['Limites e intervalos', 'Measuring range', 'limite de deteccion', 'límite de detección', 'límite de cuantificación',
-                                'limite de cuantificacion', 'loq'],
-        'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'analizador hematológico',
-                                   'contador celular', 'system', 'sistema', 'informacion del sistema',
-                                   'información del sistema'],
-        'Información clínica': ['Uso previsto', 'summary', 'caracteristicas', 'características', 'utilidad clinica', 'utilidad clínica',
-                                'informacion clinica', 'información clínica'],
+        'Límite de detección': ['Limites e intervalos', 'Measuring range', 'limite de deteccion', 'límite de detección', 'límite de cuantificación', 'limite de cuantificacion', 'loq'],
+        'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'analizador hematológico', 'contador celular', 'system', 'sistema', 'informacion del sistema', 'información del sistema'],
+        'Información clínica': ['Uso previsto', 'summary', 'caracteristicas', 'características', 'utilidad clinica', 'utilidad clínica', 'informacion clinica', 'información clínica'],
         'Referencias': ['referencias', 'bibliografia', 'bibliografía'],
         'Actualizado por': ['actualizado por'],
         'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
@@ -412,36 +369,24 @@ FIELD_ALIASES_POR_AREA = {
     "Bioquímica": {
         'Código': ['codigo examen', 'codigo', 'código examen', 'código', 'cod_bioq', 'código bioquímica'],
         'Nombre LIS': ['Nombre LIS', 'Derivación', 'nombre del examen', 'examen', 'analito', 'perfil bioquímico'],
-        'Laboratorio de procesamiento': ['laboratorio de procesamiento', 'laboratorio', 'sección bioquímica',
-                                         'lab bioq'],
+        'Laboratorio de procesamiento': ['laboratorio de procesamiento', 'laboratorio', 'sección bioquímica', 'lab bioq'],
         'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion', 'recepción suero'],
-        'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'centrifugación',
-                                      'separación de suero'],
+        'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'centrifugación', 'separación de suero'],
         'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat'],
         'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'ayuno 8 horas', 'ayuno 12 horas'],
         'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'punción venosa'],
-        'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'suero', 'plasma', 'tubo tapa roja',
-                                           'tubo gel separador', 'obtencion y preparacion de las muestras',
-                                           'obtención y preparación de las muestras'],
+        'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'suero', 'plasma', 'tubo tapa roja', 'tubo gel separador', 'obtencion y preparacion de las muestras', 'obtención y preparación de las muestras'],
         'Rotulación': ['Rotulación', 'Rotulacion'],
-        'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'estabilidad suero',
-                                      'conservacion y estabilidad', 'conservación y estabilidad'],
-        'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte',
-                                                'refrigerado 2-8°c'],
+        'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'estabilidad suero', 'conservacion y estabilidad', 'conservación y estabilidad'],
+        'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte', 'refrigerado 2-8°c'],
         'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'suero lipémico', 'suero ictérico', 'hemólisis ++'],
-        'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'espectrofotometría', 'fotometría',
-                                    'enzimático', 'principio del test', 'principio', 'principio de la prueba'],
-        'Test incluidos': ['test incluidos', 'pruebas incluidas', 'perfil hepático', 'perfil lipídico',
-                           'función renal'],
-        'Valores de referencia': ['valor de referencia', 'valores de referencia', 'valores normales',
-                                  'rangos de referencia'],
+        'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'espectrofotometría', 'fotometría', 'enzimático', 'principio del test', 'principio', 'principio de la prueba'],
+        'Test incluidos': ['test incluidos', 'pruebas incluidas', 'perfil hepático', 'perfil lipídico', 'función renal'],
+        'Valores de referencia': ['valor de referencia', 'valores de referencia', 'valores normales', 'rangos de referencia'],
         'Valor crítico': ['valor critico', 'valor crítico', 'hipoglicemia severa', 'hiperkalemia'],
-        'Límite de detección': ['limite de deteccion', 'límite de detección', 'límite de cuantificación',
-                                'limite de cuantificacion', 'loq'],
-        'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'autoanalizador bioquímico', 'system',
-                                   'sistema', 'informacion del sistema', 'información del sistema'],
-        'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'utilidad clínica',
-                                'informacion clinica', 'información clínica'],
+        'Límite de detección': ['limite de deteccion', 'límite de detección', 'límite de cuantificación', 'limite de cuantificacion', 'loq'],
+        'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'autoanalizador bioquímico', 'system', 'sistema', 'informacion del sistema', 'información del sistema'],
+        'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'utilidad clínica', 'informacion clinica', 'información clínica'],
         'Referencias': ['referencias', 'bibliografia', 'bibliografía'],
         'Actualizado por': ['actualizado por'],
         'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
@@ -449,44 +394,58 @@ FIELD_ALIASES_POR_AREA = {
     },
     "Hormonas e inmunidad": {
         'Código': ['codigo examen', 'codigo', 'código examen', 'código', 'cod_hormonas', 'código inmunología'],
-        'Nombre LIS': ['Nombre LIS', 'Derivación', 'nombre del examen', 'examen', 'inmunoensayo', 'hormona',
-                       'anticuerpo'],
-        'Laboratorio de procesamiento': ['laboratorio de procesamiento', 'laboratorio', 'sección hormonas',
-                                         'lab inmunología'],
+        'Nombre LIS': ['Nombre LIS', 'Derivación', 'nombre del examen', 'examen', 'inmunoensayo', 'hormona', 'anticuerpo'],
+        'Laboratorio de procesamiento': ['laboratorio de procesamiento', 'laboratorio', 'sección hormonas', 'lab inmunología'],
         'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion'],
         'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'centrifugación de muestra'],
         'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat'],
-        'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'horario de toma específico',
-                                     'ritmo circadiano'],
+        'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'horario de toma específico', 'ritmo circadiano'],
         'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'punción venosa'],
-        'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'suero', 'tubo tapa roja',
-                                           'tubo gel separador', 'obtencion y preparacion de las muestras',
-                                           'obtención y preparación de las muestras'],
+        'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'suero', 'tubo tapa roja', 'tubo gel separador', 'obtencion y preparacion de las muestras', 'obtención y preparación de las muestras'],
         'Rotulación': ['Rotulación', 'Rotulacion'],
-        'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'estabilidad en congelación',
-                                      'conservacion y estabilidad', 'conservación y estabilidad'],
-        'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte',
-                                                'transporte congelado', 'refrigerado'],
+        'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'estabilidad en congelación', 'conservacion y estabilidad', 'conservación y estabilidad'],
+        'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte', 'transporte congelado', 'refrigerado'],
         'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'muestra descongelada', 'hemólisis intensa'],
-        'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'elisa', 'quimioluminiscencia', 'eclia',
-                                    'ria', 'inmunofluorometría', 'principio del test', 'principio',
-                                    'principio de la prueba'],
+        'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'elisa', 'quimioluminiscencia', 'eclia', 'ria', 'inmunofluorometría', 'principio del test', 'principio', 'principio de la prueba'],
         'Test incluidos': ['test incluidos', 'pruebas incluidas', 'perfil tiroideo', 'panel hormonal'],
-        'Valores de referencia': ['valor de referencia', 'valores de referencia', 'rangos según edad/sexo',
-                                  'fase folicular/lútea'],
+        'Valores de referencia': ['valor de referencia', 'valores de referencia', 'rangos según edad/sexo', 'fase folicular/lútea'],
         'Valor crítico': ['valor critico', 'valor crítico', 'alerta endocrina'],
-        'Límite de detección': ['limite de deteccion', 'límite de detección', 'sensibilidad funcional',
-                                'límite de cuantificación', 'limite de cuantificacion', 'loq'],
-        'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'analizador de inmunoensayo', 'system',
-                                   'sistema', 'informacion del sistema', 'información del sistema'],
-        'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'utilidad clínica',
-                                'informacion clinica', 'información clínica'],
+        'Límite de detección': ['limite de deteccion', 'límite de detección', 'sensibilidad funcional', 'límite de cuantificación', 'limite de cuantificacion', 'loq'],
+        'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'analizador de inmunoensayo', 'system', 'sistema', 'informacion del sistema', 'información del sistema'],
+        'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'utilidad clínica', 'informacion clinica', 'información clínica'],
+        'Referencias': ['referencias', 'bibliografia', 'bibliografía'],
+        'Actualizado por': ['actualizado por'],
+        'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
+        'Autorizado por': ['autorizado por'],
+    },
+    "Derivados": {
+        'Código': ['codigo derivado', 'codigo examen', 'codigo', 'código derivado', 'código examen', 'código', 'cod_derivado', 'código derivación'],
+        'Nombre LIS': ['Nombre LIS', 'Derivación', 'nombre del examen', 'examen derivado', 'nombre examen derivado', 'examen', 'prestación derivada', 'nombre derivación'],
+        'Laboratorio de procesamiento': ['laboratorio de derivación', 'laboratorio derivador', 'laboratorio de procesamiento', 'laboratorio de referencia', 'lab derivación', 'laboratorio destino', 'centro derivador'],
+        'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion derivación', 'recepción muestra derivada', 'recepción'],
+        'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento derivado', 'alicuotado', 'preparación de envío', 'procesamiento'],
+        'Plazo entrega resultados': ['tiempo de respuesta derivado', 'plazo entrega resultados', 'plazo de entrega', 'tat derivación', 'días de proceso externo', 'tiempo de respuesta'],
+        'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'preparacion del paciente', 'preparación del paciente', 'indicaciones previas derivación'],
+        'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'toma de muestra para derivación', 'procedimiento de examen'],
+        'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'recipiente de derivación', 'tubo de envío', 'medio de transporte', 'obtencion y preparacion de las muestras', 'obtención y preparación de las muestras'],
+        'Rotulación': ['Rotulación', 'Rotulacion', 'etiquetado de derivación'],
+        'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'estabilidad en tránsito', 'conservación y estabilidad', 'conservacion y estabilidad'],
+        'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'condiciones de envío derivación', 'temperatura de transporte derivado', 'transporte derivación', 'envío a laboratorio de referencia', 'condiciones de envio', 'condiciones de envío'],
+        'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'criterios rechazo derivación', 'rechazo en recepción externa'],
+        'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'metodología externa', 'método de procesamiento', 'metodologia', 'metodología', 'principio del test', 'principio'],
+        'Test incluidos': ['test incluidos', 'pruebas incluidas', 'panel derivado', 'examenes incluidos'],
+        'Valores de referencia': ['valor de referencia', 'valores de referencia', 'rangos de referencia externos', 'valores normales'],
+        'Valor crítico': ['valor critico', 'valor crítico', 'alerta de derivación'],
+        'Límite de detección': ['limite de deteccion', 'límite de detección', 'loq', 'límite de cuantificación'],
+        'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'sistema externo', 'tecnología de referencia', 'system', 'sistema'],
+        'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'utilidad clínica', 'informacion clinica', 'información clínica'],
         'Referencias': ['referencias', 'bibliografia', 'bibliografía'],
         'Actualizado por': ['actualizado por'],
         'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
         'Autorizado por': ['autorizado por'],
     },
 }
+FIELD_ALIASES_POR_AREA["Hematología y coagulación"] = FIELD_ALIASES_POR_AREA["Hematología"]
 
 SECCIONES_DOCUMENTO_MAESTRAS = [
     'uso previsto', 'caracteristicas', 'características',
@@ -631,8 +590,7 @@ def parse_labeled_text(text, field_aliases=None, examen_activo=None):
         if matched_field:
             current = matched_field
             if remainder:
-                found[current] = (found.get(current, '') + ('\n' if found.get(current) else '') + clean_value(
-                    remainder)).strip()
+                found[current] = (found.get(current, '') + ('\n' if found.get(current) else '') + clean_value(remainder)).strip()
             else:
                 found.setdefault(current, '')
             continue
@@ -662,7 +620,6 @@ def infer_name_code(text, data):
         if m:
             data['Código'] = m.group(0)
 
-    # 1. Búsqueda y extracción limpia de modelos de equipamiento (ej. cobas t 511, cobas t 711, cobas c 501, cobas pure, etc.)
     equipos_encontrados = re.findall(r'\bcobas\s+(?:[a-zA-Z]\s*)?\d{3,4}\b|\bcobas\s+(?:pure|pro)\b', text, flags=re.I)
     if equipos_encontrados:
         equipos_limpios = []
@@ -675,12 +632,10 @@ def infer_name_code(text, data):
         lineas_limpias = []
         for line in data['Equipamiento utilizado'].split('\n'):
             l = line.strip()
-            if l and not re.search(r'^(?:ACN|Nombre abreviado|Información|\d{4,5}|utilizar con|plasma|UniCal|UniCon)',
-                                   l, re.I):
+            if l and not re.search(r'^(?:ACN|Nombre abreviado|Información|\d{4,5}|utilizar con|plasma|UniCal|UniCon)', l, re.I):
                 lineas_limpias.append(l)
         data['Equipamiento utilizado'] = "\n".join(lineas_limpias)
 
-    # 2. Detección inteligente del Método de procesamiento si no se capturó por encabezado
     if not data.get('Método de procesamiento'):
         patrones_metodo = [
             r'\bm[eé]todo\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]{3,35}(?=\.|\n|,|$)',
@@ -755,7 +710,6 @@ def process(uploaded_bytes, filename, template_bytes, centro='', nombre_examen='
     ZONA_HORARIA = ZoneInfo("America/Santiago")
     fecha_actual = datetime.now(ZONA_HORARIA).strftime('%d/%m/%Y %H:%M')
 
-    # Asignar explícitamente los campos metadata elegidos por el usuario y la fecha actual
     data['Nombre LIS'] = nombre_examen.strip()
     data['Laboratorio de procesamiento'] = (centro or '').strip()
     data['Actualizado por'] = (actualizado_por or '').strip()
@@ -780,7 +734,6 @@ def process(uploaded_bytes, filename, template_bytes, centro='', nombre_examen='
 
     updates = apply_to_sheet(ws, data)
 
-    # Asegurar la inserción exacta en las filas del Excel
     filas = {norm(str(ws.cell(r, 1).value or '')): r for r in range(1, ws.max_row + 1)}
     for campo, val in [
         ('Nombre LIS', nombre_examen.strip()),
@@ -799,7 +752,6 @@ def process(uploaded_bytes, filename, template_bytes, centro='', nombre_examen='
             cell.alignment = Alignment(vertical='top', wrap_text=True)
     ajustar_ancho_columnas(ws)
 
-    # Registro de extracción
     log_name = 'Registro extracción'
     if log_name in wb.sheetnames:
         del wb[log_name]
@@ -977,7 +929,6 @@ if not check_login():
 st.title(APP_TITLE)
 st.caption("documento de derivación → extracción → revisión → exportación")
 
-# Estados de la aplicación
 if "examenes_por_area" not in st.session_state:
     st.session_state["examenes_por_area"] = cargar_examenes_por_area()
 if "area_activa" not in st.session_state:
@@ -1106,9 +1057,9 @@ if st.session_state.get("area_activa") is None:
         Para comenzar a trabajar, selecciona un **área del laboratorio** en el panel lateral de la izquierda.
 
         **Pasos para el procesamiento:**
-        1. 🧪 **Selecciona un área** (Microbiología, Hematología, Bioquímica, etc.).
+        1. 🧪 **Selecciona un área** (Microbiología, Hematología, Bioquímica, Derivados, etc.).
         2. 📋 **Selecciona o añade el examen** en el menú desplegable del área.
-        3. 📄 **Carga la ficha técnica (PDF)** para extraer y revisar la información automáticamente.
+        3. 📄 **Carga la ficha técnica (PDF)** para extraer, previsualizar y revisar la información automáticamente.
         """
     )
 else:
@@ -1128,7 +1079,6 @@ else:
         st.divider()
         st.markdown("##### ⚙️ Parámetros operacionales de la ficha")
 
-        # 3 Columnas directas con menú desplegable (Selectbox)
         c_lab, c_act, c_aut = st.columns(3)
 
         with c_lab:
@@ -1161,7 +1111,6 @@ else:
             )
             st.session_state["autorizado_activo"] = sel_aut
 
-        # Sección integrada para administrar opciones de las tres listas
         with st.expander("⚙️ Administrar opciones (Añadir / Eliminar de las listas arriba)"):
             tab_m_lab, tab_m_act, tab_m_aut = st.tabs(["Laboratorios", "Actualizado por", "Autorizado por"])
 
@@ -1248,10 +1197,80 @@ else:
 
         st.divider()
 
-        pdf = st.file_uploader("Cargar ficha técnica", type=["pdf"], help="PDF con la información del examen.",
-                               key="pdf_uploader")
+        pdf = st.file_uploader("Cargar ficha técnica", type=["pdf"], help="PDF con la información del examen.", key="pdf_uploader")
 
+        # --- VISTA PREVIA DEL DOCUMENTO PDF CON LUPA INTERACTIVA Y TAMAÑO ---
         if pdf:
+            with st.expander("📄 Vista previa del documento PDF cargado", expanded=True):
+                try:
+                    doc_preview = fitz.open(stream=pdf.getvalue(), filetype="pdf")
+                    num_paginas = len(doc_preview)
+                    st.caption(f"Archivo: **{pdf.name}** | Total de páginas: **{num_paginas}**")
+
+                    col_prev1, col_prev2, col_prev3 = st.columns([2, 1, 1])
+
+                    with col_prev1:
+                        if num_paginas > 1:
+                            pag_seleccionada = st.slider("Página a visualizar", 1, num_paginas, 1, key="pdf_page_slider")
+                        else:
+                            pag_seleccionada = 1
+
+                    with col_prev2:
+                        zoom_level = st.slider("🔍 Ancho de vista (%)", min_value=50, max_value=180, value=100, step=10, key="pdf_zoom_slider")
+
+                    with col_prev3:
+                        magnify_scale = st.slider("🔎 Potencia de Lupa (x)", min_value=1.5, max_value=3.5, value=2.2, step=0.3, key="pdf_magnify_slider")
+
+                    page = doc_preview[pag_seleccionada - 1]
+                    pix = page.get_pixmap(dpi=150)
+                    img_b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
+
+                    ancho_visual = int(750 * (zoom_level / 100))
+
+                    # Contenedor HTML interactivo con efecto Lupa en el cursor
+                    html_lupa = f"""
+                    <div style="display: flex; flex-direction: column; align-items: center; width: 100%;">
+                        <div class="lupa-container" style="
+                            position: relative;
+                            overflow: hidden;
+                            border: 1px solid #ddd;
+                            border-radius: 8px;
+                            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+                            display: inline-block;
+                            cursor: crosshair;
+                            max-width: 100%;
+                        ">
+                            <img id="pdf-page-img" src="data:image/png;base64,{img_b64}" style="
+                                width: {ancho_visual}px;
+                                height: auto;
+                                display: block;
+                                transition: transform 0.15s ease-out;
+                                transform-origin: center center;
+                            " onmousemove="aplicarLupa(event, this)" onmouseleave="restaurarLupa(this)"/>
+                        </div>
+                        <p style="font-size: 0.8rem; color: #6c757d; margin-top: 6px;">💡 <b>Consejo:</b> Pasa el cursor sobre la página para activar la lupa interactiva.</p>
+                    </div>
+
+                    <script>
+                        function aplicarLupa(e, img) {{
+                            const rect = img.getBoundingClientRect();
+                            const x = ((e.clientX - rect.left) / rect.width) * 100;
+                            const y = ((e.clientY - rect.top) / rect.height) * 100;
+                            img.style.transformOrigin = `${{x}}% ${{y}}%`;
+                            img.style.transform = "scale({magnify_scale})";
+                        }}
+                        function restaurarLupa(img) {{
+                            img.style.transform = "scale(1)";
+                            img.style.transformOrigin = "center center";
+                        }}
+                    </script>
+                    """
+
+                    st.components.v1.html(html_lupa, height=int(ancho_visual * 1.35), scrolling=True)
+
+                except Exception as err_preview:
+                    st.error(f"No se pudo generar la vista previa del PDF: {err_preview}")
+
             if st.button("🔎 Analizar documento", type="primary", key="analyze_pdf"):
                 if not examen_activo:
                     st.warning("Primero abre el menú del área en el panel lateral y selecciona un examen.")
@@ -1273,10 +1292,9 @@ else:
                             ws_vacio.title = examen_activo
                             for fila, campo in enumerate(aliases_area, start=1):
                                 ws_vacio.cell(row=fila, column=1, value=campo)
-                                ws_vacio.cell(row=fila, column=2,
-                                              value=examen_activo if norm(campo) == norm("Nombre LIS") else "")
-                            buf = io.BytesIO();
-                            wb_vacio.save(buf);
+                                ws_vacio.cell(row=fila, column=2, value=examen_activo if norm(campo) == norm("Nombre LIS") else "")
+                            buf = io.BytesIO()
+                            wb_vacio.save(buf)
                             template_bytes = buf.getvalue()
 
                         result = process(
@@ -1317,12 +1335,10 @@ else:
                 })
             df = pd.DataFrame(rows)
 
-
             def highlight_found(row):
                 if row["Estado"].startswith("✓"):
                     return ["background-color: #B7F7C1; color: #124D20; font-weight: bold"] * len(row)
                 return ["background-color: #FFF0B3; color: #6B4D00"] * len(row)
-
 
             st.markdown(
                 """
@@ -1342,8 +1358,7 @@ else:
             )
 
             st.subheader("Descargar Excel actualizado")
-            st.write(
-                "El Excel conserva las fichas de la plantilla del área y actualiza la ficha del examen seleccionado.")
+            st.write("El Excel conserva las fichas de la plantilla del área y actualiza la ficha del examen seleccionado.")
             st.download_button(
                 "Descargar Excel actualizado (.xlsx)", type="primary",
                 data=out,
