@@ -1,5 +1,6 @@
-import io, os, re, tempfile, subprocess, shutil, csv, json, hashlib, copy, base64, xml.etree.ElementTree as ET
-from datetime import datetime
+import io, os, re, tempfile, subprocess, shutil, csv, json, hashlib, copy, base64, sqlite3, xml.etree.ElementTree as ET
+from difflib import SequenceMatcher
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import openpyxl
 import fitz  # PyMuPDF
@@ -7,8 +8,230 @@ import streamlit as st
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
 
 APP_TITLE = 'Herramienta de Extracción de Datos de Fichas Técnicas'
+MAX_PDFS_PERMITIDOS = 5
+DB_PATH = os.path.join(os.path.dirname(__file__), "cartera.db")
+
+# --- GESTIÓN DE BASE DE DATOS SQLITE (CARTERA DE EXÁMENES) ---
+def init_db():
+    """Inicializa la base de datos SQLite si no existe."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS cartera_examenes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre_examen TEXT UNIQUE,
+            codigo_examen TEXT,
+            indicaciones TEXT,
+            tecnologia TEXT,
+            entrega_normal TEXT,
+            entrega_urgente TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS cartera_metadata (
+            clave TEXT PRIMARY KEY,
+            valor TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+
+def guardar_cartera_db(df):
+    """Guarda la Cartera extrayendo ESTRICTAMENTE los nombres desde la Columna 6 (DESCRIPCION)."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    col_nombre_series = None
+    
+    for col in df.columns:
+        if str(col).strip().upper() in ["DESCRIPCION", "DESCRIPCIÓN"]:
+            col_nombre_series = df[col]
+            break
+
+    if col_nombre_series is None and len(df.columns) >= 6:
+        col_nombre_series = df.iloc[:, 5]  # Columna 6 de Excel
+    elif col_nombre_series is None and len(df.columns) > 0:
+        col_nombre_series = df.iloc[:, 0]
+
+    cols_exactas = {norm(str(c)): c for c in df.columns}
+
+    def buscar_col(alias_list):
+        for a in alias_list:
+            if a in cols_exactas:
+                return cols_exactas[a]
+        for a in alias_list:
+            for k_norm, k_real in cols_exactas.items():
+                if a in k_norm:
+                    return k_real
+        return None
+
+    col_codigo = buscar_col(["codigo examen", "codigo host", "codigo", "código"])
+    col_indicaciones = buscar_col(["indicaciones", "preparacion paciente", "preparación paciente", "preparacion"])
+    col_tecnologia = buscar_col(["tecnologia", "tecnología", "equipamiento", "equipo", "instrumento"])
+    col_normal = buscar_col(["entrega normal", "plazo normal", "normal", "tat normal"])
+    col_urgente = buscar_col(["entrega urgente", "plazo urgente", "urgente", "tat urgente"])
+
+    cursor.execute("DELETE FROM cartera_examenes")
+
+    filas_guardadas = 0
+    for idx, nombre_raw in col_nombre_series.items():
+        nombre = str(nombre_raw).strip()
+
+        if not nombre or nombre.casefold() in ["nan", "none", "null", "descripcion", "descripción"] or nombre.isdigit():
+            continue
+
+        row = df.loc[idx]
+
+        codigo = str(row.get(col_codigo, "")).strip() if col_codigo else ""
+        indicaciones = str(row.get(col_indicaciones, "")).strip() if col_indicaciones else ""
+        tecnologia = str(row.get(col_tecnologia, "")).strip() if col_tecnologia else ""
+        normal = str(row.get(col_normal, "")).strip() if col_normal else ""
+        urgente = str(row.get(col_urgente, "")).strip() if col_urgente else ""
+
+        codigo = "" if codigo.casefold() in ["nan", "none"] else codigo
+        indicaciones = "" if indicaciones.casefold() in ["nan", "none"] else indicaciones
+        tecnologia = "" if tecnologia.casefold() in ["nan", "none"] else tecnologia
+        normal = "" if normal.casefold() in ["nan", "none"] else normal
+        urgente = "" if urgente.casefold() in ["nan", "none"] else urgente
+
+        cursor.execute("""
+            INSERT OR REPLACE INTO cartera_examenes (nombre_examen, codigo_examen, indicaciones, tecnologia, entrega_normal, entrega_urgente)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (nombre, codigo, indicaciones, tecnologia, normal, urgente))
+        filas_guardadas += 1
+
+    ZONA_HORARIA = ZoneInfo("America/Santiago")
+    fecha_actual = datetime.now(ZONA_HORARIA).isoformat()
+    cursor.execute("INSERT OR REPLACE INTO cartera_metadata (clave, valor) VALUES ('ultima_actualizacion', ?)", (fecha_actual,))
+
+    conn.commit()
+    conn.close()
+    return True, f"Se importaron exitosamente {filas_guardadas} exámenes desde la Columna 6 (DESCRIPCION) a la Cartera."
+
+
+def obtener_lista_cartera_db():
+    """Retorna la lista ordenada de nombres/DESCRIPCION de exámenes almacenados en la Cartera."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT nombre_examen FROM cartera_examenes WHERE nombre_examen NOT GLOB '[0-9]*' ORDER BY nombre_examen ASC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [r[0] for r in rows if r[0]]
+
+
+def buscar_mejor_coincidencia_cartera(nombre_buscar):
+    """
+    Busca por similitud (Fuzzy Matching) el examen de la Cartera que mejor coincide con 'nombre_buscar'.
+    Retorna: (mejor_nombre_db, score_0_a_100, dict_info_cartera)
+    """
+    if not nombre_buscar:
+        return None, 0.0, None
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT nombre_examen, codigo_examen, indicaciones, tecnologia, entrega_normal, entrega_urgente FROM cartera_examenes")
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        return None, 0.0, None
+
+    mejor_nombre = None
+    mejor_score = 0.0
+    mejor_row = None
+
+    norm_buscar = norm(nombre_buscar)
+
+    for row in rows:
+        nombre_db = row[0]
+        norm_db = norm(nombre_db)
+
+        if norm_buscar == norm_db:
+            score = 1.0
+        elif norm_buscar in norm_db or norm_db in norm_buscar:
+            ratio = SequenceMatcher(None, norm_buscar, norm_db).ratio()
+            score = max(0.88, ratio)
+        else:
+            score = SequenceMatcher(None, norm_buscar, norm_db).ratio()
+
+        if score > mejor_score:
+            mejor_score = score
+            mejor_nombre = nombre_db
+            mejor_row = row
+
+    if mejor_row and mejor_score >= 0.40:
+        codigo, indicaciones, tecnologia, normal, urgente = mejor_row[1:]
+        plazo_partes = []
+        if normal:
+            plazo_partes.append(f"Entrega Normal: {normal}")
+        if urgente:
+            plazo_partes.append(f"Entrega Urgente: {urgente}")
+        plazo_total = " | ".join(plazo_partes)
+
+        info = {
+            "Código": codigo or "",
+            "Preparación del paciente": indicaciones or "",
+            "Equipamiento utilizado": tecnologia or "",
+            "Plazo entrega resultados": plazo_total or ""
+        }
+        return mejor_nombre, round(mejor_score * 100, 1), info
+
+    return None, 0.0, None
+
+
+def obtener_info_cartera_por_nombre(nombre_exacto_cartera):
+    """Consulta SQLite obteniendo los datos completos de un examen específico de la Cartera."""
+    if not nombre_exacto_cartera:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT codigo_examen, indicaciones, tecnologia, entrega_normal, entrega_urgente FROM cartera_examenes WHERE nombre_examen = ?", (nombre_exacto_cartera.strip(),))
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        codigo, indicaciones, tecnologia, normal, urgente = row
+        plazo_partes = []
+        if normal:
+            plazo_partes.append(f"Entrega Normal: {normal}")
+        if urgente:
+            plazo_partes.append(f"Entrega Urgente: {urgente}")
+        plazo_total = " | ".join(plazo_partes)
+
+        return {
+            "Código": codigo or "",
+            "Preparación del paciente": indicaciones or "",
+            "Equipamiento utilizado": tecnologia or "",
+            "Plazo entrega resultados": plazo_total or ""
+        }
+    return None
+
+
+def fecha_actualizacion_cartera():
+    """Consulta la última fecha de actualización y valida los 6 meses (180 días)."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT valor FROM cartera_metadata WHERE clave = 'ultima_actualizacion'")
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row or not row[0]:
+        return None, True, "No se ha subido ninguna Cartera de Exámenes a la base de datos."
+
+    ZONA_HORARIA = ZoneInfo("America/Santiago")
+    fecha_dt = datetime.fromisoformat(row[0])
+    dias_transcurridos = (datetime.now(ZONA_HORARIA) - fecha_dt).days
+    es_antiguo = dias_transcurridos >= 180
+
+    msg_fecha = fecha_dt.strftime("%d/%m/%Y %H:%M")
+    return fecha_dt, es_antiguo, msg_fecha
+
 
 # --- GESTIÓN DE LABORATORIOS ---
 LABORATORIOS_PREDETERMINADOS = [
@@ -286,10 +509,12 @@ def limpiar_valor_excel(valor, examen_activo=None):
     return convertir_subindices("\n".join(salida).strip())
 
 
+# --- ALIAS ESPECÍFICOS POR CADA ÁREA DEL LABORATORIO ---
+
 FIELD_ALIASES_BASE = {
-    'Código': ['codigo examen', 'codigo', 'código examen', 'código', 'Código del Examen'],
-    'Nombre LIS': ['Nombre LIS', 'Derivación', 'nombre del examen', 'examen', 'nombre examen', 'Nombres del Examen'],
-    'Laboratorio de procesamiento': ['laboratorio de procesamiento', 'laboratorio'],
+    'Código': [],
+    'Nombre LIS': [],
+    'Laboratorio de procesamiento': [],
     'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion'],
     'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento de muetsras', 'procesamiento'],
     'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat', 'tiempo procesamiento'],
@@ -313,139 +538,155 @@ FIELD_ALIASES_BASE = {
     'Autorizado por': ['autorizado por'],
 }
 
-FIELD_ALIASES_POR_AREA = {
-    "Microbiología": {
-        'Código': ['codigo examen', 'codigo', 'código examen', 'código', 'cod_micro', 'código microbiología'],
-        'Nombre LIS': ['Nombre LIS', 'Derivación', 'nombre del examen', 'examen', 'cultivo', 'agente', 'microorganismo'],
-        'Laboratorio de procesamiento': ['laboratorio de procesamiento', 'laboratorio', 'sección microbiología', 'lab micro'],
-        'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion', 'recepción cultivo'],
-        'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'siembra', 'incubación'],
-        'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat', 'días de incubación'],
-        'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'preparacion del paciente', 'sin antibióticos previa toma'],
-        'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'toma de muestra', 'técnica aséptica', 'hisopado'],
-        'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'muestra', 'medio de transporte', 'stuart', 'frasco estéril', 'obtencion y preparacion de las muestras', 'obtención y preparación de las muestras'],
-        'Rotulación': ['Rotulación', 'Rotulacion', 'etiquetado muestra'],
-        'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'conservación cultivo', 'conservacion y estabilidad', 'conservación y estabilidad'],
-        'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte', 'envio al laboratorio', 'transporte ambiente'],
-        'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'muestra contaminada', 'frasco derramado'],
-        'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'metodología', 'método', 'cultivo tradicional', 'maldi-tof', 'antibiograma', 'principio del test', 'principio', 'principio de la prueba'],
-        'Test incluidos': ['test incluidos', 'pruebas incluidas', 'tinción gram', 'identificación y antibiograma'],
-        'Valores de referencia': ['valor de referencia', 'valores de referencia', 'desarrollo bacteriano', 'sin desarrollo'],
-        'Valor crítico': ['valor critico', 'valor crítico', 'hemocultivo positivo', 'patógeno crítico'],
-        'Límite de detección': ['limite de deteccion', 'límite de detección', 'sensibilidad analítica', 'límite de cuantificación', 'limite de cuantificacion', 'loq'],
-        'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'incubadora', 'estufa', 'sistema automatizado micro', 'system', 'sistema', 'informacion del sistema', 'información del sistema'],
-        'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'utilidad clínica', 'informacion clinica', 'información clínica'],
-        'Referencias': ['referencias', 'bibliografia', 'bibliografía'],
-        'Actualizado por': ['actualizado por'],
-        'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
-        'Autorizado por': ['autorizado por'],
-    },
-    "Hematología": {
-        'Código': ['codigo examen', 'codigo', 'código examen', 'código', 'cod_hemato', 'código hematología'],
-        'Nombre LIS': ['Nombre LIS', 'Derivación', 'nombre del examen', 'examen', 'hemograma', 'recuento', 'frotis'],
-        'Laboratorio de procesamiento': ['laboratorio de procesamiento', 'laboratorio', 'sección hematología', 'lab hemato'],
-        'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion', 'recepción tubo edta'],
-        'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'homogenización', 'frotis sanguíneo'],
-        'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat', 'tiempo procesamiento'],
-        'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'preparacion del paciente', 'ayuno previo'],
-        'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'punción venosa'],
-        'Muestra requerida y recipiente': ['Specimen collection and preparation', 'tipo de muestra', 'muestra requerida', 'tubo edta', 'tubo tapa morada', 'sangre total', 'obtencion y preparacion de las muestras', 'obtención y preparación de las muestras'],
-        'Rotulación': ['Rotulación', 'Rotulacion'],
-        'Estabilidad de la muestra': ['Estabilidad:', 'Stability:', 'estabilidad muestra', 'estabilidad de la muestra', 'estabilidad frotis'],
-        'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte', 'envio ambiente', 'sin congelar'],
-        'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'muestra coagulada', 'coágulos', 'hemólisis'],
-        'Método de procesamiento': ['Test principle', 'Assay principle', 'metodo utilizado', 'método utilizado', 'metodología', 'citometría de flujo', 'impedancia', 'microscopía', 'principio del test', 'principio', 'principio de la prueba'],
-        'Test incluidos': ['test incluidos', 'pruebas incluidas', 'fórmula leucocitaria', 'recuento de plaquetas', 'índices eritrocitarios'],
-        'Valores de referencia': ['Valores teóricos', 'Expected values', 'Reference intervals', 'Valores treóricos', 'valor de referencia', 'valores de referencia', 'valores normales', 'rangos hematológicos'],
-        'Valor crítico': ['valor critico', 'valor crítico', 'plaquetopenia severa', 'blastos en frotis'],
-        'Límite de detección': ['Limites e intervalos', 'Measuring range', 'limite de deteccion', 'límite de detección', 'límite de cuantificación', 'limite de cuantificacion', 'loq'],
-        'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'analizador hematológico', 'contador celular', 'system', 'sistema', 'informacion del sistema', 'información del sistema'],
-        'Información clínica': ['Uso previsto', 'summary', 'caracteristicas', 'características', 'utilidad clinica', 'utilidad clínica', 'informacion clinica', 'información clínica'],
-        'Referencias': ['referencias', 'bibliografia', 'bibliografía'],
-        'Actualizado por': ['actualizado por'],
-        'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
-        'Autorizado por': ['autorizado por'],
-    },
-    "Bioquímica": {
-        'Código': ['codigo examen', 'codigo', 'código examen', 'código', 'cod_bioq', 'código bioquímica'],
-        'Nombre LIS': ['Nombre LIS', 'Derivación', 'nombre del examen', 'examen', 'analito', 'perfil bioquímico'],
-        'Laboratorio de procesamiento': ['laboratorio de procesamiento', 'laboratorio', 'sección bioquímica', 'lab bioq'],
-        'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion', 'recepción suero'],
-        'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'centrifugación', 'separación de suero'],
-        'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat'],
-        'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'ayuno 8 horas', 'ayuno 12 horas'],
-        'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'punción venosa'],
-        'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'suero', 'plasma', 'tubo tapa roja', 'tubo gel separador', 'obtencion y preparacion de las muestras', 'obtención y preparación de las muestras'],
-        'Rotulación': ['Rotulación', 'Rotulacion'],
-        'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'estabilidad suero', 'conservacion y estabilidad', 'conservación y estabilidad'],
-        'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte', 'refrigerado 2-8°c'],
-        'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'suero lipémico', 'suero ictérico', 'hemólisis ++'],
-        'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'espectrofotometría', 'fotometría', 'enzimático', 'principio del test', 'principio', 'principio de la prueba'],
-        'Test incluidos': ['test incluidos', 'pruebas incluidas', 'perfil hepático', 'perfil lipídico', 'función renal'],
-        'Valores de referencia': ['valor de referencia', 'valores de referencia', 'valores normales', 'rangos de referencia'],
-        'Valor crítico': ['valor critico', 'valor crítico', 'hipoglicemia severa', 'hiperkalemia'],
-        'Límite de detección': ['limite de deteccion', 'límite de detección', 'límite de cuantificación', 'limite de cuantificacion', 'loq'],
-        'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'autoanalizador bioquímico', 'system', 'sistema', 'informacion del sistema', 'información del sistema'],
-        'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'utilidad clínica', 'informacion clinica', 'información clínica'],
-        'Referencias': ['referencias', 'bibliografia', 'bibliografía'],
-        'Actualizado por': ['actualizado por'],
-        'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
-        'Autorizado por': ['autorizado por'],
-    },
-    "Hormonas e inmunidad": {
-        'Código': ['codigo examen', 'codigo', 'código examen', 'código', 'cod_hormonas', 'código inmunología'],
-        'Nombre LIS': ['Nombre LIS', 'Derivación', 'nombre del examen', 'examen', 'inmunoensayo', 'hormona', 'anticuerpo'],
-        'Laboratorio de procesamiento': ['laboratorio de procesamiento', 'laboratorio', 'sección hormonas', 'lab inmunología'],
-        'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion'],
-        'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'centrifugación de muestra'],
-        'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat'],
-        'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'horario de toma específico', 'ritmo circadiano'],
-        'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'punción venosa'],
-        'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'suero', 'tubo tapa roja', 'tubo gel separador', 'obtencion y preparacion de las muestras', 'obtención y preparación de las muestras'],
-        'Rotulación': ['Rotulación', 'Rotulacion'],
-        'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'estabilidad en congelación', 'conservacion y estabilidad', 'conservación y estabilidad'],
-        'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte', 'transporte congelado', 'refrigerado'],
-        'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'muestra descongelada', 'hemólisis intensa'],
-        'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'elisa', 'quimioluminiscencia', 'eclia', 'ria', 'inmunofluorometría', 'principio del test', 'principio', 'principio de la prueba'],
-        'Test incluidos': ['test incluidos', 'pruebas incluidas', 'perfil tiroideo', 'panel hormonal'],
-        'Valores de referencia': ['valor de referencia', 'valores de referencia', 'rangos según edad/sexo', 'fase folicular/lútea'],
-        'Valor crítico': ['valor critico', 'valor crítico', 'alerta endocrina'],
-        'Límite de detección': ['limite de deteccion', 'límite de detección', 'sensibilidad funcional', 'límite de cuantificación', 'limite de cuantificacion', 'loq'],
-        'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'analizador de inmunoensayo', 'system', 'sistema', 'informacion del sistema', 'información del sistema'],
-        'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'utilidad clínica', 'informacion clinica', 'información clínica'],
-        'Referencias': ['referencias', 'bibliografia', 'bibliografía'],
-        'Actualizado por': ['actualizado por'],
-        'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
-        'Autorizado por': ['autorizado por'],
-    },
-    "Derivados": {
-        'Código': ['codigo derivado', 'codigo examen', 'codigo', 'código derivado', 'código examen', 'código', 'cod_derivado', 'código derivación'],
-        'Nombre LIS': ['Nombre LIS', 'Derivación', 'nombre del examen', 'examen derivado', 'nombre examen derivado', 'examen', 'prestación derivada', 'nombre derivación'],
-        'Laboratorio de procesamiento': ['laboratorio de derivación', 'laboratorio derivador', 'laboratorio de procesamiento', 'laboratorio de referencia', 'lab derivación', 'laboratorio destino', 'centro derivador'],
-        'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion derivación', 'recepción muestra derivada', 'recepción'],
-        'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento derivado', 'alicuotado', 'preparación de envío', 'procesamiento'],
-        'Plazo entrega resultados': ['tiempo de respuesta derivado', 'plazo entrega resultados', 'plazo de entrega', 'tat derivación', 'días de proceso externo', 'tiempo de respuesta'],
-        'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'preparacion del paciente', 'preparación del paciente', 'indicaciones previas derivación'],
-        'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'toma de muestra para derivación', 'procedimiento de examen'],
-        'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'recipiente de derivación', 'tubo de envío', 'medio de transporte', 'obtencion y preparacion de las muestras', 'obtención y preparación de las muestras'],
-        'Rotulación': ['Rotulación', 'Rotulacion', 'etiquetado de derivación'],
-        'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'estabilidad en tránsito', 'conservación y estabilidad', 'conservacion y estabilidad'],
-        'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'condiciones de envío derivación', 'temperatura de transporte derivado', 'transporte derivación', 'envío a laboratorio de referencia', 'condiciones de envio', 'condiciones de envío'],
-        'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'criterios rechazo derivación', 'rechazo en recepción externa'],
-        'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'metodología externa', 'método de procesamiento', 'metodologia', 'metodología', 'principio del test', 'principio'],
-        'Test incluidos': ['test incluidos', 'pruebas incluidas', 'panel derivado', 'examenes incluidos'],
-        'Valores de referencia': ['valor de referencia', 'valores de referencia', 'rangos de referencia externos', 'valores normales'],
-        'Valor crítico': ['valor critico', 'valor crítico', 'alerta de derivación'],
-        'Límite de detección': ['limite de deteccion', 'límite de detección', 'loq', 'límite de cuantificación'],
-        'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'sistema externo', 'tecnología de referencia', 'system', 'sistema'],
-        'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'utilidad clínica', 'informacion clinica', 'información clínica'],
-        'Referencias': ['referencias', 'bibliografia', 'bibliografía'],
-        'Actualizado por': ['actualizado por'],
-        'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
-        'Autorizado por': ['autorizado por'],
-    },
+# 1. MICROBIOLOGÍA
+FIELD_ALIASES_MICROBIOLOGIA = {
+    'Código': [],
+    'Nombre LIS': [],
+    'Laboratorio de procesamiento': [],
+    'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion'],
+    'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'tiempo siembra'],
+    'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat', 'tiempo incubacion', 'dias cultivo'],
+    'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'preparacion del paciente'],
+    'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'obtencion muestra microbiologica', 'tecnica hisopado', 'toma de muestra'],
+    'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'muestra', 'medio de transporte', 'frasco estéril', 'hisopo', 'recipiente'],
+    'Rotulación': ['Rotulación', 'Rotulacion'],
+    'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'Conservación y estabilidad', 'temperatura cultivo'],
+    'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte', 'condiciones de envio', 'transporte muestra'],
+    'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'muestra contaminada', 'hisopo seco'],
+    'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'metodo de procesamiento', 'metodologia', 'tintura gram', 'siembra en agar', 'cultivo', 'antibiograma', 'pcr microbiologico'],
+    'Test incluidos': ['test incluidos', 'pruebas incluidas', 'identificacion bacteriana', 'sensibilidad antibiotica'],
+    'Valores de referencia': ['valor de referencia', 'valores de referencia', 'flora normal', 'sin desarrollo bacteriano', 'resultado esperado'],
+    'Valor crítico': ['valor critico', 'valor crítico', 'patógeno crítico', 'alerta microbiológica'],
+    'Límite de detección': ['limite de deteccion', 'límite de detección', 'ufc/ml min', 'sensibilidad analítica'],
+    'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'estufa incubadora', 'autoclave', 'vitek', 'maldi-tof', 'sistema automatizado de hemocultivos'],
+    'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'informacion clinica', 'asociación infecciosa'],
+    'Referencias': ['referencias', 'bibliografia', 'clsi', 'eucast'],
+    'Actualizado por': ['actualizado por'],
+    'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
+    'Autorizado por': ['autorizado por'],
 }
-FIELD_ALIASES_POR_AREA["Hematología y coagulación"] = FIELD_ALIASES_POR_AREA["Hematología"]
+
+# 2. HEMATOLOGÍA Y COAGULACIÓN
+FIELD_ALIASES_HEMATOLOGIA = {
+    'Código': [],
+    'Nombre LIS': [],
+    'Laboratorio de procesamiento': [],
+    'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion'],
+    'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'homogeneizacion'],
+    'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat', 'tiempo procesamiento'],
+    'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'ayuno hematologia'],
+    'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'puncion venosa', 'anticoagulante edta', 'tubo citrato'],
+    'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'sangre total', 'plasma citratado', 'tubo tapa morada', 'tubo tapa azul'],
+    'Rotulación': ['Rotulación', 'Rotulacion'],
+    'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'estabilidad en edta', 'estabilidad en citrato'],
+    'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte', 'envio temperatura ambiente', 'no congelar sangre total'],
+    'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'muestra coagulada', 'muestra hemolisada', 'volumen insuficiente', 'relación anticoagulante'],
+    'Método de procesamiento': ['principio del test', 'principio', 'principio de la prueba'],
+    'Test incluidos': ['test incluidos', 'pruebas incluidas', 'fórmula leucocitaria', 'indices hematimetricos'],
+    'Valores de referencia': ['valor de referencia', 'valores de referencia', 'rangos de referencia por edad y sexo', 'valores normales'],
+    'Valor crítico': ['valor critico', 'valor crítico', 'plaquetopenia severa', 'inr crítico', 'hemoglobina crítica'],
+    'Límite de detección': ['limite de deteccion', 'límite de detección', 'rango de linealidad'],
+    'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'contador hematologico', 'coagulometro', 'sysmex', 'stago'],
+    'Información clínica': ['caracteristicas', 'características'],
+    'Referencias': ['referencias', 'bibliografia', 'fuentes'],
+    'Actualizado por': ['actualizado por'],
+    'Fecha actualización': ['fecha actualización'],
+    'Autorizado por': ['autorizado por'],
+}
+
+# 3. BIOQUÍMICA
+FIELD_ALIASES_BIOQUIMICA = {
+    'Código': [],
+    'Nombre LIS': [],
+    'Laboratorio de procesamiento': [],
+    'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion'],
+    'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'centrifugacion', 'tiempo suero'],
+    'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat'],
+    'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'ayuno de 8 a 12 horas', 'restricción dietética'],
+    'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'puncion venosa', 'tubo suero gel'],
+    'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'suero', 'plasma', 'orina de 24 horas', 'tubo tapa roja', 'tubo tapa amarilla'],
+    'Rotulación': ['Rotulación', 'Rotulacion'],
+    'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'estabilidad del suero', 'conservacion refrigerada'],
+    'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte', 'suero separado', 'transporte refrigerado'],
+    'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'suero hemolisado', 'suero icterico', 'suero lipemico'],
+    'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'metodo de procesamiento', 'metodologia', 'espectrofotometria', 'enzimatico', 'colorimetrico', 'electrodo ion selectivo', 'ise'],
+    'Test incluidos': ['test incluidos', 'pruebas incluidas', 'perfil hepatico', 'perfil lipidico', 'perfil renal'],
+    'Valores de referencia': ['valor de referencia', 'valores de referencia', 'rangos de referencia', 'valores normales'],
+    'Valor crítico': ['valor critico', 'valor crítico', 'potasio crítico', 'glicemia crítica', 'sodio crítico'],
+    'Límite de detección': ['limite de deteccion', 'límite de detección', 'linealidad analítica', 'loq'],
+    'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'analizador bioquimico', 'cobas', 'architect'],
+    'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'evaluación metabólica', 'función renal'],
+    'Referencias': ['referencias', 'bibliografia', 'fuentes'],
+    'Actualizado por': ['actualizado por'],
+    'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
+    'Autorizado por': ['autorizado por'],
+}
+
+# 4. HORMONAS E INMUNIDAD
+FIELD_ALIASES_HORMONAS = {
+    'Código': [],
+    'Nombre LIS': [],
+    'Laboratorio de procesamiento': [],
+    'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion'],
+    'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento'],
+    'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat'],
+    'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'hora de toma de muestra', 'ritmo circadiano', 'ciclo menstrual'],
+    'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'puncion venosa'],
+    'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'suero', 'plasma edta', 'tubo suero con separador'],
+    'Rotulación': ['Rotulación', 'Rotulacion'],
+    'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'estabilidad hormonas', 'congelación suero'],
+    'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte', 'envio congelado', 'cadena de frio'],
+    'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'hemolisis', 'descongelamiento previo'],
+    'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'metodo de procesamiento', 'metodologia', 'quimioluminiscencia', 'eclia', 'elisa', 'ria', 'electroquimioluminiscencia'],
+    'Test incluidos': ['test incluidos', 'pruebas incluidas', 'perfil tiroideo', 'panel hormonal'],
+    'Valores de referencia': ['valor de referencia', 'valores de referencia', 'valores por trimestre', 'valores por fase menstrual'],
+    'Valor crítico': ['valor critico', 'valor crítico', 'alerta endocrina'],
+    'Límite de detección': ['limite de deteccion', 'límite de detección', 'sensibilidad funcional'],
+    'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'analizador de inmunoensayo', 'cobas e', 'centaur', 'immulite'],
+    'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'evaluación endocrina'],
+    'Referencias': ['referencias', 'bibliografia', 'fuentes'],
+    'Actualizado por': ['actualizado por'],
+    'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
+    'Autorizado por': ['autorizado por'],
+}
+
+# 5. DERIVADOS
+FIELD_ALIASES_DERIVADOS = {
+    'Código': [],
+    'Nombre LIS': [],
+    'Laboratorio de procesamiento': [],
+    'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion'],
+    'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'preparacion envio'],
+    'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat derivación', 'dias hábiles'],
+    'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'indicaciones laboratorio externo'],
+    'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'protocolo de derivación'],
+    'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'alícuota', 'volumen minimo enviado'],
+    'Rotulación': ['Rotulación', 'Rotulacion', 'etiqueta derivación'],
+    'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'estabilidad en viaje'],
+    'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte', 'transporte refrigerado', 'transporte congelado', 'nieve seca'],
+    'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'incumplimiento cadena de frio', 'volumen insuficiente'],
+    'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'metodo de procesamiento', 'metodologia', 'espectrometria de masas', 'pcr', 'secuenciacion'],
+    'Test incluidos': ['test incluidos', 'pruebas incluidas', 'panel genético', 'screening de derivación'],
+    'Valores de referencia': ['valor de referencia', 'valores de referencia', 'rangos laboratorio de referencia'],
+    'Valor crítico': ['valor critico', 'valor crítico'],
+    'Límite de detección': ['limite de deteccion', 'límite de detección'],
+    'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'tecnología laboratorio de origen'],
+    'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'diagnóstico genético / derivado'],
+    'Referencias': ['referencias', 'bibliografia', 'fuentes'],
+    'Actualizado por': ['actualizado por'],
+    'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
+    'Autorizado por': ['autorizado por'],
+}
+
+# MAPEO DE DICCIONARIOS POR ÁREA
+FIELD_ALIASES_POR_AREA = {
+    "Microbiología": FIELD_ALIASES_MICROBIOLOGIA,
+    "Hematología": FIELD_ALIASES_HEMATOLOGIA,
+    "Hematología y coagulación": FIELD_ALIASES_HEMATOLOGIA,
+    "Bioquímica": FIELD_ALIASES_BIOQUIMICA,
+    "Hormonas e inmunidad": FIELD_ALIASES_HORMONAS,
+    "Derivados": FIELD_ALIASES_DERIVADOS,
+}
 
 SECCIONES_DOCUMENTO_MAESTRAS = [
     'uso previsto', 'caracteristicas', 'características',
@@ -465,7 +706,7 @@ SECCIONES_DOCUMENTO_MAESTRAS = [
 
 
 def get_field_aliases(area=None):
-    """Obtiene el diccionario de alias del área solicitada o la estructura de respaldo."""
+    """Obtiene el diccionario de alias específico del área solicitada o la estructura predeterminada."""
     if area and area in FIELD_ALIASES_POR_AREA:
         return FIELD_ALIASES_POR_AREA[area]
     return FIELD_ALIASES_BASE
@@ -480,7 +721,7 @@ def norm(s):
 
 
 def extract_pdf_text(uploaded_bytes, filename, examen_activo=None):
-    """Extrae texto de un PDF utilizando PyMuPDF filtrando dinámicamente márgenes y ruido."""
+    """Extrae texto de un PDF utilizando PyMuPDF y respaldo con RapidOCR (100% Python)."""
     try:
         doc = fitz.open(stream=uploaded_bytes, filetype="pdf")
         pages_text = []
@@ -531,18 +772,32 @@ def extract_pdf_text(uploaded_bytes, filename, examen_activo=None):
         pass
 
     try:
-        import pytesseract
+        from rapidocr_onnxruntime import RapidOCR
+        import numpy as np
         from PIL import Image
 
+        engine = RapidOCR()
         doc = fitz.open(stream=uploaded_bytes, filetype="pdf")
         parts = []
+
         for page in doc:
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            pix = page.get_pixmap(dpi=200)
             img = Image.open(io.BytesIO(pix.tobytes("png")))
-            parts.append(pytesseract.image_to_string(img, lang="spa+eng"))
-        return "\n\n".join(parts), "PyMuPDF (OCR)"
-    except Exception as e:
-        raise RuntimeError("No se pudo extraer texto del PDF con PyMuPDF ni OCR.") from e
+            result, _ = engine(np.array(img))
+            if result:
+                lineas_pagina = [line[1] for line in result]
+                parts.append("\n".join(lineas_pagina))
+
+        texto_ocr = "\n\n".join(parts)
+        if len(re.sub(r"\s", "", texto_ocr)) < 10:
+            raise RuntimeError("El documento es una imagen o escaneo de muy baja resolución/calidad.")
+
+        return texto_ocr, "PyMuPDF (RapidOCR)"
+
+    except ImportError:
+        raise RuntimeError("La librería 'rapidocr-onnxruntime' no está instalada.")
+    except Exception as err_ocr:
+        raise RuntimeError(f"Fallo en el motor OCR: {err_ocr}")
 
 
 def clean_value(v):
@@ -560,6 +815,8 @@ def parse_labeled_text(text, field_aliases=None, examen_activo=None):
 
     label_patterns = []
     for field, aliases in field_aliases.items():
+        if field == "Código":
+            continue
         for a in aliases:
             label_patterns.append((field, a))
     label_patterns.sort(key=lambda x: len(x[1]), reverse=True)
@@ -615,26 +872,14 @@ def parse_labeled_text(text, field_aliases=None, examen_activo=None):
 
 
 def infer_name_code(text, data):
-    if not data.get('Código'):
-        m = re.search(r'\b\d{6,}(?:[-.]\d+)?\b', text)
-        if m:
-            data['Código'] = m.group(0)
-
     equipos_encontrados = re.findall(r'\bcobas\s+(?:[a-zA-Z]\s*)?\d{3,4}\b|\bcobas\s+(?:pure|pro)\b', text, flags=re.I)
-    if equipos_encontrados:
+    if equipos_encontrados and not data.get('Equipamiento utilizado'):
         equipos_limpios = []
         for eq in equipos_encontrados:
             eq_norm = re.sub(r'\s+', ' ', eq).strip()
             if eq_norm.casefold() not in [x.casefold() for x in equipos_limpios]:
                 equipos_limpios.append(eq_norm)
         data['Equipamiento utilizado'] = "\n".join(equipos_limpios)
-    elif data.get('Equipamiento utilizado'):
-        lineas_limpias = []
-        for line in data['Equipamiento utilizado'].split('\n'):
-            l = line.strip()
-            if l and not re.search(r'^(?:ACN|Nombre abreviado|Información|\d{4,5}|utilizar con|plasma|UniCal|UniCon)', l, re.I):
-                lineas_limpias.append(l)
-        data['Equipamiento utilizado'] = "\n".join(lineas_limpias)
 
     if not data.get('Método de procesamiento'):
         patrones_metodo = [
@@ -680,7 +925,6 @@ def apply_to_sheet(ws, data):
 
 
 def crear_hoja_examen(wb, nombre_examen, field_aliases=None):
-    """Crea una ficha nueva usando los campos del área correspondiente cuando el examen aún no existe."""
     if field_aliases is None:
         field_aliases = FIELD_ALIASES_BASE
     ok, mensaje = nombre_examen_valido(nombre_examen)
@@ -696,7 +940,7 @@ def crear_hoja_examen(wb, nombre_examen, field_aliases=None):
 
 
 def process(uploaded_bytes, filename, template_bytes, centro='', nombre_examen='', field_aliases=None,
-            actualizado_por='', autorizado_por=''):
+            actualizado_por='', autorizado_por='', datos_sobrescribir=None):
     if field_aliases is None:
         field_aliases = FIELD_ALIASES_BASE
     if not nombre_examen:
@@ -704,8 +948,14 @@ def process(uploaded_bytes, filename, template_bytes, centro='', nombre_examen='
     ok, mensaje = nombre_examen_valido(nombre_examen)
     if not ok:
         raise ValueError(mensaje)
+
     text, method = extract_pdf_text(uploaded_bytes, filename, nombre_examen)
     data = infer_name_code(text, parse_labeled_text(text, field_aliases, nombre_examen))
+
+    if datos_sobrescribir:
+        for campo, val in datos_sobrescribir.items():
+            if val:
+                data[campo] = val
 
     ZONA_HORARIA = ZoneInfo("America/Santiago")
     fecha_actual = datetime.now(ZONA_HORARIA).strftime('%d/%m/%Y %H:%M')
@@ -775,6 +1025,109 @@ def process(uploaded_bytes, filename, template_bytes, centro='', nombre_examen='
     wb.save(out)
     out.seek(0)
     return out.getvalue(), data, nombre_examen, score, reason, method, text
+
+
+def aplicar_ediciones_a_excel(excel_bytes, edited_df, nombre_examen):
+    """Actualiza dinámicamente el libro Excel según los valores editados en AgGrid o confirmados en el Modal."""
+    wb = load_workbook(io.BytesIO(excel_bytes))
+
+    if nombre_examen in wb.sheetnames:
+        ws = wb[nombre_examen]
+        filas = {}
+        for r in range(1, ws.max_row + 1):
+            val = str(ws.cell(r, 1).value or '').strip()
+            if val:
+                filas[norm(val)] = r
+
+        for _, row_data in edited_df.iterrows():
+            campo_norm = norm(row_data["Campo"])
+            val_editado = str(row_data["Información extraída"] or '').strip()
+            if campo_norm in filas:
+                r_idx = filas[campo_norm]
+                ws.cell(r_idx, 2).value = val_editado
+                ws.cell(r_idx, 2).alignment = Alignment(vertical='top', wrap_text=True)
+
+        if 'Registro extracción' in wb.sheetnames:
+            log_ws = wb['Registro extracción']
+            log_filas = {}
+            for r in range(1, log_ws.max_row + 1):
+                val = str(log_ws.cell(r, 1).value or '').strip()
+                if val:
+                    log_filas[norm(val)] = r
+            for _, row_data in edited_df.iterrows():
+                campo_norm = norm(row_data["Campo"])
+                val_editado = str(row_data["Información extraída"] or '').strip()
+                if campo_norm in log_filas:
+                    r_idx = log_filas[campo_norm]
+                    log_ws.cell(r_idx, 2).value = val_editado
+                    log_ws.cell(r_idx, 2).alignment = Alignment(vertical='top', wrap_text=True)
+
+    out_buf = io.BytesIO()
+    wb.save(out_buf)
+    return out_buf.getvalue()
+
+
+def comparar_plantillas_excel(bytes_antiguo, bytes_nuevo, nombre_examen):
+    """
+    Compara la plantilla existente (bytes_antiguo) contra la versión recién procesada/editada (bytes_nuevo).
+    Retorna un diccionario con estadísticas de cambio y desglose por campos.
+    """
+    def extraer_datos_fichas(raw_bytes):
+        if not raw_bytes:
+            return {}, 0, []
+        try:
+            wb = load_workbook(io.BytesIO(raw_bytes), data_only=True)
+            hojas = [h for h in wb.sheetnames if h != 'Registro extracción']
+            datos_examen = {}
+            if nombre_examen in wb.sheetnames:
+                ws = wb[nombre_examen]
+                for r in range(1, ws.max_row + 1):
+                    campo = str(ws.cell(r, 1).value or '').strip()
+                    valor = str(ws.cell(r, 2).value or '').strip()
+                    if campo:
+                        datos_examen[campo] = valor
+            return datos_examen, len(hojas), hojas
+        except Exception:
+            return {}, 0, []
+
+    datos_ant, total_hojas_ant, hojas_ant = extraer_datos_fichas(bytes_antiguo)
+    datos_nue, total_hojas_nue, hojas_nue = extraer_datos_fichas(bytes_nuevo)
+
+    campos_completados_ant = sum(1 for v in datos_ant.values() if v)
+    campos_completados_nue = sum(1 for v in datos_nue.values() if v)
+
+    diferencias = []
+    todos_campos = list(dict.fromkeys(list(datos_ant.keys()) + list(datos_nue.keys())))
+
+    for campo in todos_campos:
+        val_ant = datos_ant.get(campo, "")
+        val_nue = datos_nue.get(campo, "")
+
+        if val_ant != val_nue:
+            if not val_ant and val_nue:
+                tipo = "➕ Campo nuevo incorporado"
+            elif val_ant and not val_nue:
+                tipo = "➖ Campo eliminado / borrado"
+            else:
+                tipo = "✏️ Información modificada"
+
+            diferencias.append({
+                "Campo": campo,
+                "Valor anterior": val_ant or "(Vacío)",
+                "Valor nuevo": val_nue or "(Vacío)",
+                "Tipo de cambio": tipo
+            })
+
+    es_nueva_hoja = (nombre_examen not in hojas_ant) and (nombre_examen in hojas_nue)
+
+    return {
+        "hojas_antes": total_hojas_ant,
+        "hojas_despues": total_hojas_nue,
+        "campos_completados_antes": campos_completados_ant,
+        "campos_completados_despues": campos_completados_nue,
+        "es_nueva_hoja": es_nueva_hoja,
+        "diferencias": diferencias
+    }
 
 
 # --- ACCESO BÁSICO ---
@@ -920,11 +1273,58 @@ def guide_tab():
         st.markdown("- Revisar los cambios antes de hacer commit.")
 
 
-# --- CONFIGURACIÓN DE PÁGINA ---
+# --- CONFIGURACIÓN DE PÁGINA Y ESTILOS CSS ---
 st.set_page_config(page_title=APP_TITLE, page_icon="🧪", layout="wide")
+
+st.markdown("""
+<style>
+    .ag-theme-alpine ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+    }
+    .ag-theme-alpine ::-webkit-scrollbar-track {
+        background: #f1f5f9;
+        border-radius: 4px;
+    }
+    .ag-theme-alpine ::-webkit-scrollbar-thumb {
+        background-color: #1E293B;
+        border-radius: 4px;
+    }
+    .ag-theme-alpine ::-webkit-scrollbar-thumb:hover {
+        background-color: #0f172a;
+    }
+    .banner-alerta-expiracion {
+        background-color: #fee2e2;
+        border: 1px solid #fca5a5;
+        border-left: 6px solid #dc2626;
+        color: #991b1b;
+        padding: 12px 16px;
+        border-radius: 6px;
+        font-size: 0.92rem;
+        margin-bottom: 20px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+</style>
+""", unsafe_allow_html=True)
 
 if not check_login():
     st.stop()
+
+# --- VERIFICACIÓN DE 6 MESES PARA LA CARTERA DE EXÁMENES ---
+fecha_cartera, cartera_expirada, msg_cartera = fecha_actualizacion_cartera()
+
+if "mostrar_dialogo_expiracion" not in st.session_state and cartera_expirada:
+    st.session_state["mostrar_dialogo_expiracion"] = True
+
+if cartera_expirada:
+    st.markdown(f"""
+    <div class="banner-alerta-expiracion">
+        🚨 <b>ATENCIÓN: LA CARTERA DE EXÁMENES SUPERA LOS 6 MESES DE ANTIGÜEDAD</b><br>
+        <span style="font-size: 0.85rem;">
+        {msg_cartera if not fecha_cartera else f"La última versión de la Cartera de Exámenes fue registrada el <b>{msg_cartera}</b>. Se recomienda actualizar el Excel en la barra lateral."}
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
 
 st.title(APP_TITLE)
 st.caption("documento de derivación → extracción → revisión → exportación")
@@ -935,6 +1335,220 @@ if "area_activa" not in st.session_state:
     st.session_state["area_activa"] = None
 if "examen_activo" not in st.session_state:
     st.session_state["examen_activo"] = None
+if "aggrid_key_counter" not in st.session_state:
+    st.session_state["aggrid_key_counter"] = 0
+
+
+# --- DIÁLOGO EMERGENTE DE ALERTA DE 6 MESES ---
+@st.dialog("🔔 Alerta de mantenimiento: Cartera de Exámenes")
+def modal_alerta_cartera():
+    st.warning("⚠️ Han transcurrido más de 6 meses desde la última actualización de la Cartera de Exámenes.")
+    st.write(
+        "Para garantizar la concordancia exacta entre la información del laboratorio y las fichas extraídas, te sugerimos actualizar la base de datos subiendo el archivo Excel más reciente desde el panel lateral."
+    )
+    if st.button("Entendido / Ocultar notificación emergente", type="primary", use_container_width=True):
+        st.session_state["mostrar_dialogo_expiracion"] = False
+        st.rerun()
+
+if st.session_state.get("mostrar_dialogo_expiracion"):
+    modal_alerta_cartera()
+
+
+# --- DIÁLOGO DE CONFIRMACIÓN DE EMPAREJAMIENTO DUDOSO DE CARTERA ---
+@st.dialog("🔍 Confirmar coincidencia con Cartera de Exámenes")
+def modal_confirmar_emparejamiento(nombre_cartera_sugerido, score):
+    st.markdown(f"Se encontró una coincidencia probable del **{score}%** en la Cartera de Exámenes para el examen activo seleccionando:")
+    st.info(f"**Examen Activo:** {st.session_state.get('examen_activo')}\n\n**Cartera de Exámenes:** {nombre_cartera_sugerido}")
+    st.write("¿Deseas vincular este registro para la extracción?")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("✓ Sí, utilizar este examen de la Cartera", type="primary", use_container_width=True):
+            st.session_state["cartera_examen_emparejado"] = nombre_cartera_sugerido
+            st.session_state.pop("emparejamiento_dudoso_pendiente", None)
+            st.success(f"¡Vinculado con {nombre_cartera_sugerido}!")
+            st.rerun()
+    with col_b:
+        if st.button("❌ No, seleccionar manualmente", use_container_width=True):
+            st.session_state["cartera_examen_emparejado"] = "Sin vincular"
+            st.session_state.pop("emparejamiento_dudoso_pendiente", None)
+            st.rerun()
+
+
+# --- DIÁLOGO EMERGENTE DE COMPARACIÓN Y RESOLUCIÓN DE CONFLICTOS ---
+@st.dialog("⚖️ Comparación y Resolución de Discrepancias (PDF vs Cartera)")
+def modal_resolver_conflictos():
+    st.markdown(f"Se detectaron discrepancias entre el PDF y la Cartera de Exámenes para el examen **{st.session_state.get('examen_activo', '')}**.")
+    st.write("Por favor, revisa cada campo afectado y selecciona qué información deseas conservar:")
+    st.write("")
+
+    conflictos = st.session_state.get("conflictos_pendientes", {})
+    if not conflictos:
+        st.info("No hay discrepancias pendientes por resolver.")
+        return
+
+    respuestas = {}
+
+    for campo, datos in conflictos.items():
+        st.markdown(f"""
+        <div style="background-color: #f1f5f9; padding: 10px 14px; border-radius: 6px; border-left: 5px solid #0284c7; margin-top: 10px; margin-bottom: 12px;">
+            <span style="font-size: 1.05rem; font-weight: bold; color: #0f172a;">📌 Campo evaluado: <span style="color: #0369a1;">{campo}</span></span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.info(f"📄 **Valor extraído del PDF ({campo}):**\n\n{datos['pdf'] or '(Vacío)'}")
+        with c2:
+            st.success(f"🗃️️ **Valor en Cartera SQLite ({campo}):**\n\n{datos['cartera'] or '(Vacío)'}")
+
+        opcion = st.radio(
+            f"Selecciona el valor que deseas mantener para el campo «{campo}»:",
+            options=["Conservar valor extraído del PDF", "Utilizar registro de la Cartera de Exámenes", "Unir ambas informaciones (PDF + Cartera)"],
+            key=f"radio_conflicto_{campo}"
+        )
+        respuestas[campo] = opcion
+        st.divider()
+
+    col_btn1, col_btn2 = st.columns([2, 1])
+    with col_btn1:
+        if st.button("💾Aplicar selección y actualizar", type="primary", use_container_width=True):
+            data_actualizada = copy.deepcopy(st.session_state["data_extracted"])
+
+            for campo, eleccion in respuestas.items():
+                val_pdf = conflictos[campo]["pdf"]
+                val_cartera = conflictos[campo]["cartera"]
+
+                if eleccion == "Utilizar registro de la Cartera de Exámenes":
+                    data_actualizada[campo] = val_cartera
+                elif eleccion == "Unir ambas informaciones (PDF + Cartera)":
+                    data_actualizada[campo] = f"{val_pdf}\n\n[ Cartera de Exámenes ]:\n{val_cartera}"
+                else:
+                    data_actualizada[campo] = val_pdf
+
+            st.session_state["data_extracted"] = data_actualizada
+
+            area_res = st.session_state.get("area_resultado", st.session_state.get("area_activa"))
+            aliases_area = get_field_aliases(area_res)
+            rows_nuevas = []
+            for field in aliases_area:
+                value = data_actualizada.get(field, "")
+                if field in ["Nombre LIS", "Laboratorio de procesamiento", "Actualizado por", "Autorizado por"]:
+                    state = "✓ Ingresado por usuario" if value else "⚠ Pendiente de ingreso"
+                elif field == "Fecha actualización":
+                    state = "✓ Asignado por sistema" if value else "⚠ Pendiente de asignación"
+                else:
+                    state = "✓ Encontrado" if value else "⚠ No encontrado"
+                rows_nuevas.append({
+                    "Campo": field.strip(),
+                    "Información extraída": value,
+                    "Estado": state,
+                })
+            df_nuevo = pd.DataFrame(rows_nuevas)
+
+            st.session_state["result_bytes"] = aplicar_ediciones_a_excel(
+                st.session_state["result_bytes"],
+                df_nuevo,
+                st.session_state.get("examen_activo", "")
+            )
+
+            st.session_state.pop("conflictos_pendientes", None)
+            st.session_state["modal_conflictos_abierto"] = False
+            st.success("¡Discrepancias resueltas exitosamente!")
+            st.rerun()
+
+    with col_btn2:
+        if st.button("❌Cancelar", use_container_width=True):
+            st.session_state["modal_conflictos_abierto"] = False
+            st.rerun()
+
+
+# --- DIÁLOGO EMERGENTE DE CONFIRMACIÓN PARA REEMPLAZAR/ACTUALIZAR PLANILLA EN LA HERRAMIENTA ---
+@st.dialog("💾Confirmar actualización de la planilla del área en la herramienta")
+def modal_confirmar_actualizacion_planilla():
+    area_activa = st.session_state.get("area_activa")
+    examen_activo = st.session_state.get("examen_activo")
+    comp = st.session_state.get("comparacion_planilla_detalles", {})
+
+    st.markdown(f"Estás a punto de reemplazar la **planilla guardada en la herramienta** para el área **{area_activa}** con los datos recién procesados del examen **{examen_activo}**.")
+    st.write("")
+
+    # MÉTRICAS Y DESGLOSE DE CAMBIOS
+    col_m1, col_m2, col_m3 = st.columns(3)
+    with col_m1:
+        st.metric(
+            label="Campos del examen",
+            value=f"{comp.get('campos_completados_despues', 0)} completados",
+            delta=f"{comp.get('campos_completados_despues', 0) - comp.get('campos_completados_antes', 0)} vs versión anterior"
+        )
+    with col_m2:
+        st.metric(
+            label="Exámenes/Hojas en área",
+            value=f"{comp.get('hojas_despues', 0)} hojas",
+            delta=f"+1 nuevo examen" if comp.get("es_nueva_hoja") else "Misma cantidad"
+        )
+    with col_m3:
+        st.metric(
+            label="Campos con cambios",
+            value=f"{len(comp.get('diferencias', []))} modificados"
+        )
+
+    st.divider()
+
+    # DESGLOSE DE DIFERENCIAS DETALLADAS
+    diferencias = comp.get("diferencias", [])
+    if diferencias:
+        st.markdown("##### 🔍 Resumen de diferencias detectadas:")
+        df_dif = pd.DataFrame(diferencias)
+        st.dataframe(
+            df_dif[["Campo", "Tipo de cambio", "Valor anterior", "Valor nuevo"]],
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("ℹ️ No se detectaron diferencias en los campos. La versión actual y la nueva son idénticas.")
+
+    st.write("")
+    st.warning("⚠️ Esta acción sobreescribirá el archivo de la plantilla en el servidor para que los próximos análisis utilicen este nuevo contenido.")
+
+    col_save1, col_save2 = st.columns([2, 1])
+
+    with col_save1:
+        if st.button("✓ Confirmar y actualizar planilla en la herramienta", type="primary", use_container_width=True):
+            try:
+                config = AREA_CONFIG.get(area_activa, {})
+                plantilla_nombre = config.get("template")
+
+                if not plantilla_nombre:
+                    plantilla_nombre = f"plantilla_{norm(area_activa).replace(' ', '_')}.xlsx"
+                    AREA_CONFIG[area_activa]["template"] = plantilla_nombre
+
+                ruta_guardado = os.path.join(os.path.dirname(__file__), plantilla_nombre)
+
+                # Sobreescribir archivo en disco
+                with open(ruta_guardado, "wb") as f:
+                    f.write(st.session_state["result_bytes"])
+
+                # Actualizar lista local de exámenes si se agregó un nuevo examen/hoja
+                if comp.get("es_nueva_hoja") and examen_activo:
+                    actuales = st.session_state["examenes_por_area"].get(area_activa, [])
+                    if examen_activo.casefold() not in {x.casefold() for x in actuales}:
+                        actuales.append(examen_activo)
+                        st.session_state["examenes_por_area"][area_activa] = sorted(actuales, key=str.casefold)
+                        guardar_examenes_por_area(st.session_state["examenes_por_area"])
+
+                st.session_state["modal_confirmar_planilla_abierto"] = False
+                st.session_state.pop("comparacion_planilla_detalles", None)
+                st.success(f"¡La planilla de «{area_activa}» fue actualizada exitosamente en la herramienta!")
+                st.rerun()
+
+            except Exception as err_save:
+                st.error(f"Error al guardar la planilla en la herramienta: {err_save}")
+
+    with col_save2:
+        if st.button("❌ Cancelar", use_container_width=True):
+            st.session_state["modal_confirmar_planilla_abierto"] = False
+            st.rerun()
 
 
 def abrir_modal_area(area):
@@ -959,6 +1573,8 @@ def modal_examenes_area(area):
             if seleccionado:
                 st.session_state["area_activa"] = area
                 st.session_state["examen_activo"] = seleccionado
+                st.session_state["cartera_examen_emparejado"] = "Sin vincular"
+                st.session_state.pop("emparejamiento_dudoso_pendiente", None)
                 st.session_state.pop("modal_area_activa", None)
                 st.rerun()
             else:
@@ -967,6 +1583,8 @@ def modal_examenes_area(area):
         if st.button("Limpiar selección", key=f"limpiar_examen_{area}", use_container_width=True):
             st.session_state["area_activa"] = area
             st.session_state["examen_activo"] = None
+            st.session_state["cartera_examen_emparejado"] = "Sin vincular"
+            st.session_state.pop("emparejamiento_dudoso_pendiente", None)
             st.session_state.pop("modal_area_activa", None)
             st.rerun()
     st.divider()
@@ -988,6 +1606,8 @@ def modal_examenes_area(area):
                 if guardar_examenes_por_area(st.session_state["examenes_por_area"]):
                     st.session_state["area_activa"] = area
                     st.session_state["examen_activo"] = nuevo
+                    st.session_state["cartera_examen_emparejado"] = "Sin vincular"
+                    st.session_state.pop("emparejamiento_dudoso_pendiente", None)
                     st.session_state.pop("modal_area_activa", None)
                     st.success(f"Se agregó «{nuevo}».")
                     st.rerun()
@@ -1002,6 +1622,7 @@ def modal_examenes_area(area):
                 st.session_state["examenes_por_area"][area] = [x for x in actuales if x.casefold() != quitar.casefold()]
                 if st.session_state.get("examen_activo") == quitar and st.session_state.get("area_activa") == area:
                     st.session_state["examen_activo"] = None
+                    st.session_state["cartera_examen_emparejado"] = "Sin vincular"
                 if guardar_examenes_por_area(st.session_state["examenes_por_area"]):
                     st.session_state.pop("modal_area_activa", None)
                     st.success(f"Se quitó «{quitar}» del menú de selección.")
@@ -1034,12 +1655,34 @@ with st.sidebar:
     st.markdown(f"**Área activa:** {st.session_state.get('area_activa') or 'Sin seleccionar'}")
     st.markdown(f"**Examen activo:** {st.session_state.get('examen_activo') or 'Sin seleccionar'}")
     st.divider()
-    st.header("📁 Archivos")
-    template = st.file_uploader("Excel personalizado (opcional)", type=["xlsx"], key="template_uploader")
+
+    st.header("📃 Fichas técnicas")
+    template = st.file_uploader("Excel del área (opcional)", type=["xlsx"], key="template_uploader")
     st.caption("Si no cargas uno, se utilizará la plantilla incluida para el área seleccionada.")
+    st.divider()
+
+    st.header("🗃️ Base de datos (SQLite)")
+    with st.expander("📊 Cartera de Exámenes", expanded=cartera_expirada):
+        st.caption(f"Última actualización: **{msg_cartera}**")
+        cartera_file = st.file_uploader("Actualizar Cartera (.xlsx)", type=["xlsx"], key="cartera_uploader_sidebar")
+        if cartera_file is not None:
+            if st.button("💾 Guardar en Base de Datos", type="primary", use_container_width=True, key="btn_save_cartera"):
+                try:
+                    df_cartera = pd.read_excel(cartera_file)
+                    ok_db, msg_db = guardar_cartera_db(df_cartera)
+                    if ok_db:
+                        st.success(msg_db)
+                        st.session_state["mostrar_dialogo_expiracion"] = False
+                        st.rerun()
+                    else:
+                        st.error(msg_db)
+                except Exception as err_db:
+                    st.error(f"Error al procesar la Cartera: {err_db}")
+
+    st.divider()
     if st.button("Cerrar sesión"):
         st.session_state["authenticated"] = False
-        st.session_state.pop("result", None)
+        st.session_state.pop("result_bytes", None)
         st.session_state.pop("modal_area_activa", None)
         st.session_state["area_activa"] = None
         st.rerun()
@@ -1047,6 +1690,12 @@ with st.sidebar:
 # Modal del área activa
 if st.session_state.get("modal_area_activa") in AREA_CONFIG:
     modal_examenes_area(st.session_state["modal_area_activa"])
+
+# Modal de coincidencia dudosa
+if "emparejamiento_dudoso_pendiente" in st.session_state:
+    dudoso = st.session_state["emparejamiento_dudoso_pendiente"]
+    modal_confirmar_emparejamiento(dudoso["nombre"], dudoso["score"])
+
 
 # --- VISTA PRINCIPAL ---
 if st.session_state.get("area_activa") is None:
@@ -1059,7 +1708,8 @@ if st.session_state.get("area_activa") is None:
         **Pasos para el procesamiento:**
         1. 🧪 **Selecciona un área** (Microbiología, Hematología, Bioquímica, Derivados, etc.).
         2. 📋 **Selecciona o añade el examen** en el menú desplegable del área.
-        3. 📄 **Carga la ficha técnica (PDF)** para extraer, previsualizar y revisar la información automáticamente.
+        3. 🔗 **Verifica el emparejamiento automático** con la Cartera de Exámenes (SQLite).
+        4. 📄 **Carga la/s ficha/s técnica/s (PDF)** para extraer, previsualizar y revisar la información automáticamente.
         """
     )
 else:
@@ -1070,11 +1720,54 @@ else:
     ])
 
     with tab_pdf:
-        st.subheader("Extraer información desde un PDF")
-        st.write("Selecciona el examen en el menú del área correspondiente y carga el documento técnico.")
+        st.subheader("Extraer información desde uno o varios PDF")
         area_activa = st.session_state.get("area_activa")
         examen_activo = st.session_state.get("examen_activo")
+
         st.info(f"Área seleccionada: **{area_activa}** · Examen: **{examen_activo or 'sin seleccionar'}**")
+
+        # --- PANEL DE EMPAREJAMIENTO CON LA CARTERA DE EXÁMENES ---
+        st.markdown("##### 🔗 Emparejamiento institucional (Cartera de Exámenes en SQLite)")
+        lista_cartera = obtener_lista_cartera_db()
+
+        if not lista_cartera:
+            st.warning("⚠️ No hay datos cargados en la Cartera de Exámenes. Puedes subir el archivo Excel desde el panel lateral.")
+        else:
+            emparejado_actual = st.session_state.get("cartera_examen_emparejado", "Sin vincular")
+
+            col_emp1, col_emp2 = st.columns([2, 1])
+
+            with col_emp1:
+                opciones_cartera = ["Sin vincular"] + lista_cartera
+                idx_emp = opciones_cartera.index(emparejado_actual) if emparejado_actual in opciones_cartera else 0
+
+                seleccion_manual_cartera = st.selectbox(
+                    "Examen vinculado en la Cartera:",
+                    opciones_cartera,
+                    index=idx_emp,
+                    help="Puedes corregir o cambiar manualmente el examen de la Cartera con el que deseas cruzar la información."
+                )
+                if seleccion_manual_cartera != emparejado_actual:
+                    st.session_state["cartera_examen_emparejado"] = seleccion_manual_cartera
+                    st.rerun()
+
+            with col_emp2:
+                st.write("")
+                st.write("")
+                if st.button("🔍 Buscar coincidencia", key="btn_re_fuzzy", use_container_width=True):
+                    if examen_activo:
+                        nom_cartera, score, _ = buscar_mejor_coincidencia_cartera(examen_activo)
+                        if nom_cartera and score >= 85.0:
+                            st.session_state["cartera_examen_emparejado"] = nom_cartera
+                            st.session_state.pop("emparejamiento_dudoso_pendiente", None)
+                            st.rerun()
+                        elif nom_cartera and score >= 55.0:
+                            st.session_state["emparejamiento_dudoso_pendiente"] = {"nombre": nom_cartera, "score": score}
+                            st.rerun()
+                        else:
+                            st.warning("No se encontró una coincidencia cercana en la Cartera para este examen.")
+                    else:
+                        st.warning("Debes seleccionar primero un examen activo en la barra lateral.")
 
         st.divider()
         st.markdown("##### ⚙️ Parámetros operacionales de la ficha")
@@ -1197,15 +1890,34 @@ else:
 
         st.divider()
 
-        pdf = st.file_uploader("Cargar ficha técnica", type=["pdf"], help="PDF con la información del examen.", key="pdf_uploader")
+        # CARGA MÚLTIPLE DE ARCHIVOS PDF
+        pdfs = st.file_uploader(
+            f"Cargar fichas técnicas (Máximo {MAX_PDFS_PERMITIDOS} PDF simultáneos)",
+            type=["pdf"],
+            accept_multiple_files=True,
+            help=f"Puedes cargar hasta {MAX_PDFS_PERMITIDOS} archivos PDF para procesar.",
+            key="pdf_uploader"
+        )
 
-        # --- VISTA PREVIA DEL DOCUMENTO PDF CON LUPA INTERACTIVA Y TAMAÑO ---
-        if pdf:
-            with st.expander("📄 Vista previa del documento PDF cargado", expanded=True):
+        exceso_archivos = pdfs is not None and len(pdfs) > MAX_PDFS_PERMITIDOS
+
+        if exceso_archivos:
+            st.error(f"⚠️ Has seleccionado **{len(pdfs)} archivos**. El límite máximo simultáneo es de **{MAX_PDFS_PERMITIDOS} documentos PDF** para evitar saturar el sistema. Por favor remueve algunos archivos.")
+
+        if pdfs and not exceso_archivos:
+            # VISTA PREVIA INTERACTIVA CON LUPA
+            with st.expander("📄 Vista previa interactiva de documentos PDF", expanded=True):
                 try:
-                    doc_preview = fitz.open(stream=pdf.getvalue(), filetype="pdf")
+                    if len(pdfs) > 1:
+                        pdf_names = [p.name for p in pdfs]
+                        selected_pdf_name = st.selectbox("Selecciona el documento a previsualizar:", pdf_names, key="preview_pdf_selector")
+                        selected_pdf = next(p for p in pdfs if p.name == selected_pdf_name)
+                    else:
+                        selected_pdf = pdfs[0]
+
+                    doc_preview = fitz.open(stream=selected_pdf.getvalue(), filetype="pdf")
                     num_paginas = len(doc_preview)
-                    st.caption(f"Archivo: **{pdf.name}** | Total de páginas: **{num_paginas}**")
+                    st.caption(f"Visualizando: **{selected_pdf.name}** | Páginas: **{num_paginas}**")
 
                     col_prev1, col_prev2, col_prev3 = st.columns([2, 1, 1])
 
@@ -1219,7 +1931,7 @@ else:
                         zoom_level = st.slider("🔍 Ancho de vista (%)", min_value=50, max_value=180, value=100, step=10, key="pdf_zoom_slider")
 
                     with col_prev3:
-                        magnify_scale = st.slider("🔎 Potencia de Lupa (x)", min_value=1.5, max_value=3.5, value=2.2, step=0.3, key="pdf_magnify_slider")
+                        magnify_scale = st.slider("🔎 Potencia Lupa (x)", min_value=1.5, max_value=3.5, value=2.2, step=0.3, key="pdf_magnify_slider")
 
                     page = doc_preview[pag_seleccionada - 1]
                     pix = page.get_pixmap(dpi=150)
@@ -1227,7 +1939,6 @@ else:
 
                     ancho_visual = int(750 * (zoom_level / 100))
 
-                    # Contenedor HTML interactivo con efecto Lupa en el cursor
                     html_lupa = f"""
                     <div style="display: flex; flex-direction: column; align-items: center; width: 100%;">
                         <div class="lupa-container" style="
@@ -1271,21 +1982,30 @@ else:
                 except Exception as err_preview:
                     st.error(f"No se pudo generar la vista previa del PDF: {err_preview}")
 
-            if st.button("🔎 Analizar documento", type="primary", key="analyze_pdf"):
+            # BOTÓN DE ANÁLISIS E INTEGRACIÓN CON LA CARTERA DE EXÁMENES (SQLITE)
+            if st.button("🔎 Analizar documentos", type="primary", key="analyze_pdf", disabled=exceso_archivos):
                 if not examen_activo:
                     st.warning("Primero abre el menú del área en el panel lateral y selecciona un examen.")
                 elif not st.session_state.get("laboratorio_activo"):
                     st.warning("Selecciona un laboratorio de procesamiento antes de analizar.")
                 else:
                     try:
+                        st.session_state.pop("result_bytes", None)
+                        st.session_state.pop("data_extracted", None)
+                        st.session_state.pop("extracted_text", None)
+                        st.session_state.pop("conflictos_pendientes", None)
+
+                        st.session_state["aggrid_key_counter"] += 1
+
                         config = AREA_CONFIG[area_activa]
                         aliases_area = get_field_aliases(area_activa)
                         ruta_plantilla = os.path.join(os.path.dirname(__file__), config["template"] or "")
+
                         if template is not None:
-                            template_bytes = template.getvalue()
+                            template_bytes_init = template.getvalue()
                         elif config["template"] and os.path.exists(ruta_plantilla):
                             with open(ruta_plantilla, "rb") as f:
-                                template_bytes = f.read()
+                                template_bytes_init = f.read()
                         else:
                             wb_vacio = openpyxl.Workbook()
                             ws_vacio = wb_vacio.active
@@ -1295,29 +2015,97 @@ else:
                                 ws_vacio.cell(row=fila, column=2, value=examen_activo if norm(campo) == norm("Nombre LIS") else "")
                             buf = io.BytesIO()
                             wb_vacio.save(buf)
-                            template_bytes = buf.getvalue()
+                            template_bytes_init = buf.getvalue()
 
-                        result = process(
-                            pdf.getvalue(), pdf.name, template_bytes,
-                            st.session_state.get("laboratorio_activo", ""),
-                            examen_activo, aliases_area,
-                            st.session_state.get("actualizado_activo", ""),
-                            st.session_state.get("autorizado_activo", "")
-                        )
-                        st.session_state["result"] = result
-                        st.session_state["filename"] = pdf.name
+                        st.session_state["bytes_plantilla_inicial"] = template_bytes_init
+
+                        nombre_vinc = st.session_state.get("cartera_examen_emparejado")
+                        info_cartera = obtener_info_cartera_por_nombre(nombre_vinc) if (nombre_vinc and nombre_vinc != "Sin vincular") else None
+
+                        datos_sobrescribir = {}
+                        conflictos = {}
+
+                        if info_cartera and info_cartera.get("Código"):
+                            datos_sobrescribir["Código"] = info_cartera["Código"]
+
+                        current_template_bytes = template_bytes_init
+                        last_extracted_data = {}
+                        last_extracted_text = ""
+                        campos_comparables = ["Preparación del paciente", "Equipamiento utilizado", "Plazo entrega resultados"]
+
+                        for pdf_item in pdfs:
+                            raw_text, _ = extract_pdf_text(pdf_item.getvalue(), pdf_item.name, examen_activo)
+                            parsed_pdf_data = infer_name_code(raw_text, parse_labeled_text(raw_text, aliases_area, examen_activo))
+
+                            if info_cartera:
+                                for campo in campos_comparables:
+                                    val_pdf = str(parsed_pdf_data.get(campo, "")).strip()
+                                    val_cartera = str(info_cartera.get(campo, "")).strip()
+
+                                    if val_pdf and val_cartera and val_pdf.casefold() != val_cartera.casefold():
+                                        conflictos[campo] = {"pdf": val_pdf, "cartera": val_cartera}
+                                    elif not val_pdf and val_cartera:
+                                        datos_sobrescribir[campo] = val_cartera
+
+                            out_bytes, data, target, score, reason, method, text = process(
+                                pdf_item.getvalue(), pdf_item.name, current_template_bytes,
+                                st.session_state.get("laboratorio_activo", ""),
+                                examen_activo, aliases_area,
+                                st.session_state.get("actualizado_activo", ""),
+                                st.session_state.get("autorizado_activo", ""),
+                                datos_sobrescribir=datos_sobrescribir
+                            )
+                            current_template_bytes = out_bytes
+                            last_extracted_data.update({k: v for k, v in data.items() if v})
+                            last_extracted_text += f"\n--- Documento: {pdf_item.name} ---\n" + text
+
+                        st.session_state["result_bytes"] = current_template_bytes
+                        st.session_state["data_extracted"] = last_extracted_data
+                        st.session_state["extracted_text"] = last_extracted_text
                         st.session_state["area_resultado"] = area_activa
-                    except Exception as e:
-                        st.error(f"No se pudo analizar el documento: {e}")
-        else:
-            st.info("Carga un PDF para comenzar la extracción.")
 
-        if "result" in st.session_state:
-            out, data, target, score, reason, method, extracted_text = st.session_state["result"]
+                        if conflictos:
+                            st.session_state["conflictos_pendientes"] = conflictos
+                            st.session_state["modal_conflictos_abierto"] = True
+
+                        st.success(f"¡Se procesaron correctamente {len(pdfs)} archivo(s) PDF!")
+                        st.rerun()
+
+                    except Exception as e:
+                        st.error(f"No se pudo analizar los documentos: {e}")
+        elif not pdfs:
+            st.info("Carga uno o más PDF para comenzar la extracción.")
+
+        # DISPARO CONTROLADO DE LAS VENTANAS EMERGENTES
+        if st.session_state.get("modal_conflictos_abierto"):
+            st.session_state["modal_conflictos_abierto"] = False
+            modal_resolver_conflictos()
+
+        if st.session_state.get("modal_confirmar_planilla_abierto"):
+            st.session_state["modal_confirmar_planilla_abierto"] = False
+            modal_confirmar_actualizacion_planilla()
+
+        if "result_bytes" in st.session_state:
+            data = st.session_state.get("data_extracted", {})
             area_res = st.session_state.get("area_resultado", area_activa)
             aliases_area = get_field_aliases(area_res)
-            st.subheader("Resultado de extracción")
+
+            st.subheader("Resultado de extracción y revisión interactiva")
             st.metric("Campos encontrados", sum(bool(v) for v in data.values()))
+
+            # BANNER INFORMATIVO SI QUEDAN DISCREPANCIAS SIN RESOLVER
+            if "conflictos_pendientes" in st.session_state:
+                st.warning("⚠️ **Existen discrepancias detectadas entre la información extraída del PDF y la Cartera de Exámenes.**")
+                col_dis1, col_dis2 = st.columns([1, 2])
+                with col_dis1:
+                    if st.button("⚖️ Resolver discrepancias", type="primary", use_container_width=True):
+                        st.session_state["modal_conflictos_abierto"] = True
+                        st.rerun()
+                with col_dis2:
+                    if st.button("🗑️ Omitir y conservar valores actuales del PDF", use_container_width=True):
+                        st.session_state.pop("conflictos_pendientes", None)
+                        st.rerun()
+                st.write("")
 
             rows = []
             for field in aliases_area:
@@ -1333,42 +2121,144 @@ else:
                     "Información extraída": value,
                     "Estado": state,
                 })
-            df = pd.DataFrame(rows)
-
-            def highlight_found(row):
-                if row["Estado"].startswith("✓"):
-                    return ["background-color: #B7F7C1; color: #124D20; font-weight: bold"] * len(row)
-                return ["background-color: #FFF0B3; color: #6B4D00"] * len(row)
+            df_base = pd.DataFrame(rows)
 
             st.markdown(
                 """
-                <div style="font-size: 0.85rem; color: #6c757d; line-height: 1.6;">
-                    <span style="background-color: #d4edda; color: #155724; padding: 2px 6px; border-radius: 4px; font-weight: bold;">Verde:</span> Dato encontrado o ingresado por el usuario / sistema.
+                <div style="font-size: 0.85rem; color: #6c757d; line-height: 1.6; margin-bottom: 12px;">
+                    <span style="background-color: #B7F7C1; color: #124D20; padding: 2px 8px; border-radius: 4px; font-weight: bold;">Verde:</span> Campo completado correctamente.
+                    &nbsp;&nbsp;
+                    <span style="background-color: #FFF0B3; color: #6B4D00; padding: 2px 8px; border-radius: 4px; font-weight: bold;">Amarillo:</span> Campo pendiente de revisión / no encontrado.
                     <br><br>
-                    <span style="background-color: #fff3cd; color: #856404; padding: 2px 6px; border-radius: 4px; font-weight: bold;">Amarillo:</span> Dato no encontrado o pendiente de ingreso.
+                    💡 <b>Haz doble clic sobre cualquier celda de la columna "Información extraída" para editar su contenido directamente en la tabla.</b>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
 
-            st.dataframe(
-                df.style.apply(highlight_found, axis=1),
-                use_container_width=True,
-                hide_index=True,
+            get_row_style = JsCode("""
+            function(params) {
+                var val = params.data['Información extraída'];
+                if (val && val.toString().trim() !== '') {
+                    return {
+                        'backgroundColor': '#B7F7C1',
+                        'color': '#124D20',
+                        'fontWeight': '600'
+                    };
+                } else {
+                    return {
+                        'backgroundColor': '#FFF0B3',
+                        'color': '#6B4D00',
+                        'fontWeight': '500'
+                    };
+                }
+            }
+            """)
+
+            dark_header_style = {
+                'backgroundColor': '#1E293B',
+                'color': '#FFFFFF',
+                'fontWeight': 'bold',
+                'fontSize': '0.95rem'
+            }
+
+            gb = GridOptionsBuilder.from_dataframe(df_base)
+            gb.configure_default_column(headerStyle=dark_header_style)
+
+            gb.configure_column(
+                "Campo",
+                editable=False,
+                width=240,
+                cellStyle={'fontWeight': 'bold', 'fontSize': '0.9rem'}
+            )
+            gb.configure_column(
+                "Información extraída",
+                editable=True,
+                width=600,
+                cellEditor='agLargeTextCellEditor',
+                cellEditorPopup=True,
+                autoHeight=True
+            )
+            gb.configure_column(
+                "Estado",
+                editable=False,
+                width=200,
+                cellStyle={'textAlign': 'center', 'fontSize': '0.85rem'}
             )
 
-            st.subheader("Descargar Excel actualizado")
-            st.write("El Excel conserva las fichas de la plantilla del área y actualiza la ficha del examen seleccionado.")
-            st.download_button(
-                "Descargar Excel actualizado (.xlsx)", type="primary",
-                data=out,
-                file_name=f"Fichas_tecnicas_{st.session_state.get('area_resultado', 'Area').replace(' ', '_')}_actualizadas.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_updated_xlsx",
+            grid_options = gb.build()
+            grid_options['getRowStyle'] = get_row_style
+
+            filas_cant = len(df_base)
+            altura_tabla = min(max(filas_cant * 42 + 45, 250), 650)
+
+            grid_response = AgGrid(
+                df_base,
+                gridOptions=grid_options,
+                allow_unsafe_jscode=True,
+                update_mode=GridUpdateMode.MODEL_CHANGED,
+                fit_columns_on_grid_load=True,
+                theme="alpine",
+                height=altura_tabla,
+                key=f"aggrid_data_table_{st.session_state['aggrid_key_counter']}"
             )
+
+            edited_df = pd.DataFrame(grid_response['data'])
+
+            for idx, row in edited_df.iterrows():
+                val = str(row["Información extraída"] or '').strip()
+                field = row["Campo"]
+                if val:
+                    if field in ["Nombre LIS", "Laboratorio de procesamiento", "Actualizado por", "Autorizado por"]:
+                        edited_df.at[idx, "Estado"] = "✓ Ingresado por usuario"
+                    elif field == "Fecha actualización":
+                        edited_df.at[idx, "Estado"] = "✓ Asignado por sistema"
+                    else:
+                        edited_df.at[idx, "Estado"] = "✓ Encontrado"
+                else:
+                    if field in ["Nombre LIS", "Laboratorio de procesamiento", "Actualizado por", "Autorizado por"]:
+                        edited_df.at[idx, "Estado"] = "⚠ Pendiente de ingreso"
+                    elif field == "Fecha actualización":
+                        edited_df.at[idx, "Estado"] = "⚠ Pendiente de asignación"
+                    else:
+                        edited_df.at[idx, "Estado"] = "⚠ No encontrado"
+
+            updated_excel_bytes = aplicar_ediciones_a_excel(
+                st.session_state["result_bytes"],
+                edited_df,
+                examen_activo or ""
+            )
+            st.session_state["result_bytes"] = updated_excel_bytes
+
+            st.write("")
+            st.subheader("Opciones de guardado y exportación")
+            st.write("Puedes descargar el archivo Excel actualizado o guardarlo directamente como la nueva versión oficial del área en la herramienta.")
+
+            col_down, col_update = st.columns(2)
+
+            with col_down:
+                st.download_button(
+                    "📥 Descargar Excel actualizado (.xlsx)", type="secondary",
+                    data=updated_excel_bytes,
+                    file_name=f"Fichas_tecnicas_{st.session_state.get('area_resultado', 'Area').replace(' ', '_')}_actualizadas.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="download_updated_xlsx",
+                )
+
+            with col_update:
+                if st.button("💾 Actualizar planilla del área en la herramienta", type="primary", use_container_width=True, key="btn_trigger_save_template"):
+                    bytes_iniciales = st.session_state.get("bytes_plantilla_inicial")
+                    st.session_state["comparacion_planilla_detalles"] = comparar_plantillas_excel(
+                        bytes_iniciales,
+                        updated_excel_bytes,
+                        examen_activo or ""
+                    )
+                    st.session_state["modal_confirmar_planilla_abierto"] = True
+                    st.rerun()
 
             with st.expander("Ver texto bruto extraído"):
-                st.text_area("Texto", extracted_text, height=350, key="raw_extracted_text")
+                st.text_area("Texto", st.session_state.get("extracted_text", ""), height=350, key="raw_extracted_text")
 
     with tab_export:
         st.subheader("Exportar a otro formato")
