@@ -557,9 +557,9 @@ FIELD_ALIASES_HEMATOLOGIA = {
     'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'muestra coagulada', 'muestra hemolisada', 'volumen insuficiente', 'relación anticoagulante'],
     'Método de procesamiento': ['Principio del test','metodo utilizado', 'método utilizado', 'metodo de procesamiento', 'metodologia'],
     'Test incluidos': ['test incluidos', 'pruebas incluidas', 'fórmula leucocitaria', 'indices hematimetricos'],
-    'Valores de referencia': ['valor de referencia', 'valores de referencia', 'rangos de referencia por edad y sexo', 'valores normales'],
+    'Valores de referencia': ['valores teóricos'],
     'Valor crítico': ['valor critico', 'valor crítico', 'plaquetopenia severa', 'inr crítico', 'hemoglobina crítica'],
-    'Límite de detección': ['limite de deteccion', 'límite de detección', 'rango de linealidad'],
+    'Límite de detección': ['limite de detección:', 'límite de detección', 'rango de linealidad'],
     'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'contador hematologico', 'coagulometro', 'sysmex', 'stago'],
     'Información clínica': ['caracteristicas', 'características'],
     'Referencias': ['referencias', 'bibliografia', 'fuentes'],
@@ -1079,7 +1079,7 @@ def check_login():
     _, col_login, _ = st.columns([1, 1.2, 1])
 
     with col_login:
-        st.markdown("<h1 style='text-align: center;'>Acceso a la herramienta</h1>", unsafe_allow_html=True)
+        st.markdown("<h1 style='text-align: center;'>Acceso a herramienta</h1>", unsafe_allow_html=True)
         st.markdown("<p style='text-align: center; color: #6c757d;'>Ingresa tus credenciales para continuar.</p>",
                     unsafe_allow_html=True)
         st.write("")
@@ -2026,24 +2026,32 @@ else:
                     num_paginas = len(doc_preview)
                     st.caption(f"Visualizando documento activo en cola: **{pdf_activo.name}** | Páginas: **{num_paginas}**")
 
-                    col_prev1, col_prev2, col_prev3 = st.columns([2, 1, 1])
+                    zoom_level = 120
+
+                    col_prev1, col_prev2 = st.columns([2, 1])
 
                     with col_prev1:
                         pag_seleccionada = st.slider("Página a visualizar", 1, num_paginas, 1, key=f"pdf_page_slider_{idx_actual}") if num_paginas > 1 else 1
 
                     with col_prev2:
-                        zoom_level = st.slider("🔍 Ancho de vista (%)", min_value=50, max_value=180, value=100, step=10, key=f"pdf_zoom_slider_{idx_actual}")
-
-                    with col_prev3:
-                        magnify_scale = st.slider("🔎 Potencia Lupa (x)", min_value=1.5, max_value=3.5, value=2.2, step=0.3, key=f"pdf_magnify_slider_{idx_actual}")
+                        magnify_scale = st.slider("🔎 Potencia Lupa (x)", min_value=1.0, max_value=3.5, value=1.0, step=0.5, key=f"pdf_magnify_slider_{idx_actual}")
 
                     page = doc_preview[pag_seleccionada - 1]
                     pix = page.get_pixmap(dpi=150)
                     img_b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
 
                     ancho_visual = int(750 * (zoom_level / 100))
+                    alto_real_imagen = int(ancho_visual * (pix.height / pix.width))
+                    alto_componente = alto_real_imagen + 45  # Espacio exacto para la imagen + el texto inferior
 
                     html_lupa = f"""
+                    <style>
+                        body {{
+                            margin: 0;
+                            padding: 0;
+                            overflow: hidden;
+                        }}
+                    </style>
                     <div style="display: flex; flex-direction: column; align-items: center; width: 100%;">
                         <div class="lupa-container" style="
                             position: relative;
@@ -2081,7 +2089,8 @@ else:
                     </script>
                     """
 
-                    st.components.v1.html(html_lupa, height=int(ancho_visual * 1.35), scrolling=True)
+                    # 3. Renderizado con la altura calculada dinámicamente y scrolling desactivado
+                    st.components.v1.html(html_lupa, height=alto_componente, scrolling=False)
 
                 except Exception as err_preview:
                     st.error(f"No se pudo generar la vista previa del PDF: {err_preview}")
@@ -2232,7 +2241,7 @@ else:
                 <div style="font-size: 0.85rem; color: #6c757d; line-height: 1.6; margin-bottom: 12px;">
                     <span style="background-color: #B7F7C1; color: #124D20; padding: 2px 8px; border-radius: 4px; font-weight: bold;">Verde:</span> Campo completado correctamente.
                     &nbsp;&nbsp;
-                    <span style="background-color: #BAE6FD; color: #0369A1; padding: 2px 8px; border-radius: 4px; font-weight: bold;">Azul:</span> 🖋 Modificado por usuario.
+                    <span style="background-color: #BAE6FD; color: #0369A1; padding: 2px 8px; border-radius: 4px; font-weight: bold;">Azul:</span> Modificado por usuario.
                     &nbsp;&nbsp;
                     <span style="background-color: #FFF0B3; color: #6B4D00; padding: 2px 8px; border-radius: 4px; font-weight: bold;">Amarillo:</span> Campo pendiente de revisión / no encontrado.
                     <br><br>
@@ -2277,18 +2286,22 @@ else:
             }
 
             gb = GridOptionsBuilder.from_dataframe(df_base)
-            gb.configure_default_column(headerStyle=dark_header_style)
+            gb.configure_default_column(
+                headerStyle=dark_header_style,
+                resizable=False,       # Evita que el usuario ajuste el ancho manualmente
+                suppressMovable=True   # Evita que el usuario arrastre y reordene las columnas
+            )
 
             gb.configure_column(
                 "Campo",
                 editable=False,
-                width=240,
+                flex=2,
                 cellStyle={'fontWeight': 'bold', 'fontSize': '0.9rem'}
             )
             gb.configure_column(
                 "Información extraída",
                 editable=True,
-                width=600,
+                flex=5,
                 cellEditor='agLargeTextCellEditor',
                 cellEditorPopup=True,
                 autoHeight=True
@@ -2296,12 +2309,13 @@ else:
             gb.configure_column(
                 "Estado",
                 editable=False,
-                width=200,
+                flex=2,
                 cellStyle={'textAlign': 'center', 'fontSize': '0.85rem'}
             )
 
             grid_options = gb.build()
             grid_options['getRowStyle'] = get_row_style
+            grid_options['suppressMovableColumns'] = True
             
             grid_options['onCellValueChanged'] = JsCode("""
             function(params) {
@@ -2325,8 +2339,9 @@ else:
             }
             """)
 
+            # Cálculo dinámico para dar el espacio exacto sin barras de desplazamiento ni colapsos
             filas_cant = len(df_base)
-            altura_tabla = min(max(filas_cant * 42 + 45, 250), 650)
+            altura_tabla = filas_cant * 42 + 55
 
             grid_response = AgGrid(
                 df_base,
