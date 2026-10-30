@@ -9,6 +9,7 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+from streamlit_sortables import sort_items
 
 APP_TITLE = 'Herramienta de Extracción de Datos de Fichas Técnicas'
 MAX_PDFS_PERMITIDOS = 5
@@ -125,27 +126,24 @@ def obtener_lista_cartera_db():
     return [r[0] for r in rows if r[0]]
 
 
-def buscar_mejor_coincidencia_cartera(nombre_buscar):
+def buscar_top_coincidencias_cartera(nombre_buscar, top_n=5):
     """
-    Busca por similitud (Fuzzy Matching) el examen de la Cartera que mejor coincide con 'nombre_buscar'.
-    Retorna: (mejor_nombre_db, score_0_a_100, dict_info_cartera)
+    Busca los N mejores candidatos por similitud (Fuzzy Matching) en la Cartera para 'nombre_buscar'.
+    Retorna una lista de tuplas: [(nombre_db, score_0_a_100), ...]
     """
     if not nombre_buscar:
-        return None, 0.0, None
+        return []
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT nombre_examen, codigo_examen, indicaciones, tecnologia, entrega_normal, entrega_urgente FROM cartera_examenes")
+    cursor.execute("SELECT nombre_examen FROM cartera_examenes")
     rows = cursor.fetchall()
     conn.close()
 
     if not rows:
-        return None, 0.0, None
+        return []
 
-    mejor_nombre = None
-    mejor_score = 0.0
-    mejor_row = None
-
+    resultados = []
     norm_buscar = norm(nombre_buscar)
 
     for row in rows:
@@ -160,29 +158,10 @@ def buscar_mejor_coincidencia_cartera(nombre_buscar):
         else:
             score = SequenceMatcher(None, norm_buscar, norm_db).ratio()
 
-        if score > mejor_score:
-            mejor_score = score
-            mejor_nombre = nombre_db
-            mejor_row = row
+        resultados.append((nombre_db, round(score * 100, 1)))
 
-    if mejor_row and mejor_score >= 0.40:
-        codigo, indicaciones, tecnologia, normal, urgente = mejor_row[1:]
-        plazo_partes = []
-        if normal:
-            plazo_partes.append(f"Entrega Normal: {normal}")
-        if urgente:
-            plazo_partes.append(f"Entrega Urgente: {urgente}")
-        plazo_total = " | ".join(plazo_partes)
-
-        info = {
-            "Código": codigo or "",
-            "Preparación del paciente": indicaciones or "",
-            "Equipamiento utilizado": tecnologia or "",
-            "Plazo entrega resultados": plazo_total or ""
-        }
-        return mejor_nombre, round(mejor_score * 100, 1), info
-
-    return None, 0.0, None
+    resultados.sort(key=lambda x: x[1], reverse=True)
+    return resultados[:top_n]
 
 
 def obtener_info_cartera_por_nombre(nombre_exacto_cartera):
@@ -235,10 +214,7 @@ def fecha_actualizacion_cartera():
 
 # --- GESTIÓN DE LABORATORIOS ---
 LABORATORIOS_PREDETERMINADOS = [
-    "Redlab",
-    "Barnafi Krause",
-    "Complejo Hospitalario Dr. Sótero del Río",
-    "Dr. Luis Calvo Mackenna",
+    "Laboratorio CRS Cordillera Oriente",
 ]
 LABORATORIOS_FILE = os.path.join(os.path.dirname(__file__), "laboratorios.json")
 
@@ -533,12 +509,11 @@ FIELD_ALIASES_BASE = {
     'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'instrumentacion', 'instrumentación', 'equipo', 'system', 'sistema', 'informacion del sistema', 'información del sistema'],
     'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'utilidad clínica', 'informacion clinica', 'información clínica'],
     'Referencias': ['referencias', 'bibliografia', 'bibliografía', 'fuentes'],
-    'Actualizado por': ['actualizado por'],
-    'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
-    'Autorizado por': ['autorizado por'],
+    'Actualizado por': [],
+    'Fecha actualización': [],
+    'Autorizado por': [],
 }
 
-# 1. MICROBIOLOGÍA
 FIELD_ALIASES_MICROBIOLOGIA = {
     'Código': [],
     'Nombre LIS': [],
@@ -550,7 +525,7 @@ FIELD_ALIASES_MICROBIOLOGIA = {
     'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'obtencion muestra microbiologica', 'tecnica hisopado', 'toma de muestra'],
     'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'muestra', 'medio de transporte', 'frasco estéril', 'hisopo', 'recipiente'],
     'Rotulación': ['Rotulación', 'Rotulacion'],
-    'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'Conservación y estabilidad', 'temperatura cultivo'],
+    'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'Conservación y estabilidad'],
     'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte', 'condiciones de envio', 'transporte muestra'],
     'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'muestra contaminada', 'hisopo seco'],
     'Método de procesamiento': ['metodo utilizado', 'método utilizado', 'metodo de procesamiento', 'metodologia', 'tintura gram', 'siembra en agar', 'cultivo', 'antibiograma', 'pcr microbiologico'],
@@ -561,12 +536,11 @@ FIELD_ALIASES_MICROBIOLOGIA = {
     'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'estufa incubadora', 'autoclave', 'vitek', 'maldi-tof', 'sistema automatizado de hemocultivos'],
     'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'informacion clinica', 'asociación infecciosa'],
     'Referencias': ['referencias', 'bibliografia', 'clsi', 'eucast'],
-    'Actualizado por': ['actualizado por'],
-    'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
-    'Autorizado por': ['autorizado por'],
+    'Actualizado por': [],
+    'Fecha actualización': [],
+    'Autorizado por': [],
 }
 
-# 2. HEMATOLOGÍA Y COAGULACIÓN
 FIELD_ALIASES_HEMATOLOGIA = {
     'Código': [],
     'Nombre LIS': [],
@@ -578,10 +552,10 @@ FIELD_ALIASES_HEMATOLOGIA = {
     'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'puncion venosa', 'anticoagulante edta', 'tubo citrato'],
     'Muestra requerida y recipiente': ['tipo de muestra', 'muestra requerida', 'sangre total', 'plasma citratado', 'tubo tapa morada', 'tubo tapa azul'],
     'Rotulación': ['Rotulación', 'Rotulacion'],
-    'Estabilidad de la muestra': ['estabilidad muestra', 'estabilidad de la muestra', 'estabilidad en edta', 'estabilidad en citrato'],
+    'Estabilidad de la muestra': ['Estabilidad:'],
     'Condiciones de envío al Laboratorio': ['Condiciones de envío al Laboratorio', 'temperatura de transporte', 'envio temperatura ambiente', 'no congelar sangre total'],
     'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'muestra coagulada', 'muestra hemolisada', 'volumen insuficiente', 'relación anticoagulante'],
-    'Método de procesamiento': ['principio del test', 'principio', 'principio de la prueba'],
+    'Método de procesamiento': ['Principio del test','metodo utilizado', 'método utilizado', 'metodo de procesamiento', 'metodologia'],
     'Test incluidos': ['test incluidos', 'pruebas incluidas', 'fórmula leucocitaria', 'indices hematimetricos'],
     'Valores de referencia': ['valor de referencia', 'valores de referencia', 'rangos de referencia por edad y sexo', 'valores normales'],
     'Valor crítico': ['valor critico', 'valor crítico', 'plaquetopenia severa', 'inr crítico', 'hemoglobina crítica'],
@@ -589,12 +563,11 @@ FIELD_ALIASES_HEMATOLOGIA = {
     'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'contador hematologico', 'coagulometro', 'sysmex', 'stago'],
     'Información clínica': ['caracteristicas', 'características'],
     'Referencias': ['referencias', 'bibliografia', 'fuentes'],
-    'Actualizado por': ['actualizado por'],
-    'Fecha actualización': ['fecha actualización'],
-    'Autorizado por': ['autorizado por'],
+    'Actualizado por': [],
+    'Fecha actualización': [],
+    'Autorizado por': [],
 }
 
-# 3. BIOQUÍMICA
 FIELD_ALIASES_BIOQUIMICA = {
     'Código': [],
     'Nombre LIS': [],
@@ -617,12 +590,11 @@ FIELD_ALIASES_BIOQUIMICA = {
     'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'analizador bioquimico', 'cobas', 'architect'],
     'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'evaluación metabólica', 'función renal'],
     'Referencias': ['referencias', 'bibliografia', 'fuentes'],
-    'Actualizado por': ['actualizado por'],
-    'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
-    'Autorizado por': ['autorizado por'],
+    'Actualizado por': [],
+    'Fecha actualización': [],
+    'Autorizado por': [],
 }
 
-# 4. HORMONAS E INMUNIDAD
 FIELD_ALIASES_HORMONAS = {
     'Código': [],
     'Nombre LIS': [],
@@ -645,12 +617,11 @@ FIELD_ALIASES_HORMONAS = {
     'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'analizador de inmunoensayo', 'cobas e', 'centaur', 'immulite'],
     'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'evaluación endocrina'],
     'Referencias': ['referencias', 'bibliografia', 'fuentes'],
-    'Actualizado por': ['actualizado por'],
-    'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
-    'Autorizado por': ['autorizado por'],
+    'Actualizado por': [],
+    'Fecha actualización': [],
+    'Autorizado por': [],
 }
 
-# 5. DERIVADOS
 FIELD_ALIASES_DERIVADOS = {
     'Código': [],
     'Nombre LIS': [],
@@ -673,12 +644,11 @@ FIELD_ALIASES_DERIVADOS = {
     'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'tecnología laboratorio de origen'],
     'Información clínica': ['caracteristicas', 'características', 'utilidad clinica', 'diagnóstico genético / derivado'],
     'Referencias': ['referencias', 'bibliografia', 'fuentes'],
-    'Actualizado por': ['actualizado por'],
-    'Fecha actualización': ['fecha actualizacion', 'fecha actualización'],
-    'Autorizado por': ['autorizado por'],
+    'Actualizado por': [],
+    'Fecha actualización': [],
+    'Autorizado por': [],
 }
 
-# MAPEO DE DICCIONARIOS POR ÁREA
 FIELD_ALIASES_POR_AREA = {
     "Microbiología": FIELD_ALIASES_MICROBIOLOGIA,
     "Hematología": FIELD_ALIASES_HEMATOLOGIA,
@@ -706,7 +676,6 @@ SECCIONES_DOCUMENTO_MAESTRAS = [
 
 
 def get_field_aliases(area=None):
-    """Obtiene el diccionario de alias específico del área solicitada o la estructura predeterminada."""
     if area and area in FIELD_ALIASES_POR_AREA:
         return FIELD_ALIASES_POR_AREA[area]
     return FIELD_ALIASES_BASE
@@ -721,7 +690,6 @@ def norm(s):
 
 
 def extract_pdf_text(uploaded_bytes, filename, examen_activo=None):
-    """Extrae texto de un PDF utilizando PyMuPDF y respaldo con RapidOCR (100% Python)."""
     try:
         doc = fitz.open(stream=uploaded_bytes, filetype="pdf")
         pages_text = []
@@ -1002,23 +970,6 @@ def process(uploaded_bytes, filename, template_bytes, centro='', nombre_examen='
             cell.alignment = Alignment(vertical='top', wrap_text=True)
     ajustar_ancho_columnas(ws)
 
-    log_name = 'Registro extracción'
-    if log_name in wb.sheetnames:
-        del wb[log_name]
-    log = wb.create_sheet(log_name)
-    log.append(['Área', 'Examen seleccionado', 'Documento', 'Método de extracción', 'Fecha de procesamiento'])
-    log.append(['', nombre_examen, filename, method, datetime.now(ZONA_HORARIA).strftime('%Y-%m-%d %H:%M:%S')])
-    log.append([])
-    log.append(['Campo', 'Información extraída'])
-    for field in field_aliases:
-        log.append([field, data.get(field, '')])
-    for row in log.iter_rows():
-        for cell in row:
-            if isinstance(cell.value, str):
-                cell.value = limpiar_valor_excel(cell.value, nombre_examen)
-            cell.alignment = Alignment(vertical='top', wrap_text=True)
-    ajustar_ancho_columnas(log)
-
     wb.active = ws
 
     out = io.BytesIO()
@@ -1028,7 +979,6 @@ def process(uploaded_bytes, filename, template_bytes, centro='', nombre_examen='
 
 
 def aplicar_ediciones_a_excel(excel_bytes, edited_df, nombre_examen):
-    """Actualiza dinámicamente el libro Excel según los valores editados en AgGrid o confirmados en el Modal."""
     wb = load_workbook(io.BytesIO(excel_bytes))
 
     if nombre_examen in wb.sheetnames:
@@ -1047,37 +997,18 @@ def aplicar_ediciones_a_excel(excel_bytes, edited_df, nombre_examen):
                 ws.cell(r_idx, 2).value = val_editado
                 ws.cell(r_idx, 2).alignment = Alignment(vertical='top', wrap_text=True)
 
-        if 'Registro extracción' in wb.sheetnames:
-            log_ws = wb['Registro extracción']
-            log_filas = {}
-            for r in range(1, log_ws.max_row + 1):
-                val = str(log_ws.cell(r, 1).value or '').strip()
-                if val:
-                    log_filas[norm(val)] = r
-            for _, row_data in edited_df.iterrows():
-                campo_norm = norm(row_data["Campo"])
-                val_editado = str(row_data["Información extraída"] or '').strip()
-                if campo_norm in log_filas:
-                    r_idx = log_filas[campo_norm]
-                    log_ws.cell(r_idx, 2).value = val_editado
-                    log_ws.cell(r_idx, 2).alignment = Alignment(vertical='top', wrap_text=True)
-
     out_buf = io.BytesIO()
     wb.save(out_buf)
     return out_buf.getvalue()
 
 
 def comparar_plantillas_excel(bytes_antiguo, bytes_nuevo, nombre_examen):
-    """
-    Compara la plantilla existente (bytes_antiguo) contra la versión recién procesada/editada (bytes_nuevo).
-    Retorna un diccionario con estadísticas de cambio y desglose por campos.
-    """
     def extraer_datos_fichas(raw_bytes):
         if not raw_bytes:
             return {}, 0, []
         try:
             wb = load_workbook(io.BytesIO(raw_bytes), data_only=True)
-            hojas = [h for h in wb.sheetnames if h != 'Registro extracción']
+            hojas = wb.sheetnames
             datos_examen = {}
             if nombre_examen in wb.sheetnames:
                 ws = wb[nombre_examen]
@@ -1143,6 +1074,7 @@ def check_login():
         return True
 
     st.session_state.pop("modal_area_activa", None)
+    st.session_state["mostrar_modal_examenes"] = False
 
     _, col_login, _ = st.columns([1, 1.2, 1])
 
@@ -1170,6 +1102,7 @@ def check_login():
                     hashlib.sha256(expected_password.encode("utf-8")).digest()):
                 st.session_state["authenticated"] = True
                 st.session_state.pop("modal_area_activa", None)
+                st.session_state["mostrar_modal_examenes"] = False
                 st.session_state["area_activa"] = None
                 st.rerun()
             else:
@@ -1274,7 +1207,13 @@ def guide_tab():
 
 
 # --- CONFIGURACIÓN DE PÁGINA Y ESTILOS CSS ---
-st.set_page_config(page_title=APP_TITLE, page_icon="🧪", layout="wide")
+icon_path = os.path.join(os.path.dirname(__file__), "Pestaña.png")
+
+st.set_page_config(
+    page_title=APP_TITLE,
+    page_icon=icon_path if os.path.exists(icon_path) else "🧪",
+    layout="wide"
+)
 
 st.markdown("""
 <style>
@@ -1304,6 +1243,41 @@ st.markdown("""
         margin-bottom: 20px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
+    .banner-cola-trabajo {
+        background-color: #f0f9ff;
+        border: 1px solid #bae6fd;
+        border-left: 6px solid #0284c7;
+        color: #0369a1;
+        padding: 12px 16px;
+        border-radius: 6px;
+        font-size: 0.95rem;
+        margin-bottom: 20px;
+    }
+
+    /* ESTILO DE LA COLUMNA DE NÚMEROS: TEXTO BLANCO NATURAL SIN FONDO NI BORDES */
+    .num-slot {
+        height: 37px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        outline: none !important;
+        font-weight: bold;
+        font-size: 1rem;
+        color: #FFFFFF !important;
+        margin-bottom: 5px;
+    }
+
+    /* CONTENEDOR DE ELEMENTOS ARRASTRABLES (FORMATO Y COLOR ROJO DEFAULT DE STREAMLIT) */
+    iframe[title*="streamlit_sortables"] {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        width: 100% !important;
+        max-width: 800px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1327,7 +1301,6 @@ if cartera_expirada:
     """, unsafe_allow_html=True)
 
 st.title(APP_TITLE)
-st.caption("documento de derivación → extracción → revisión → exportación")
 
 if "examenes_por_area" not in st.session_state:
     st.session_state["examenes_por_area"] = cargar_examenes_por_area()
@@ -1337,9 +1310,14 @@ if "examen_activo" not in st.session_state:
     st.session_state["examen_activo"] = None
 if "aggrid_key_counter" not in st.session_state:
     st.session_state["aggrid_key_counter"] = 0
+if "cola_pdf_indice" not in st.session_state:
+    st.session_state["cola_pdf_indice"] = 0
+if "mostrar_modal_examenes" not in st.session_state:
+    st.session_state["mostrar_modal_examenes"] = False
 
 
-# --- DIÁLOGO EMERGENTE DE ALERTA DE 6 MESES ---
+# --- DEFINICIÓN DE DIÁLOGOS EMERGENTES DE STREAMLIT (@st.dialog) ---
+
 @st.dialog("🔔 Alerta de mantenimiento: Cartera de Exámenes")
 def modal_alerta_cartera():
     st.warning("⚠️ Han transcurrido más de 6 meses desde la última actualización de la Cartera de Exámenes.")
@@ -1350,33 +1328,44 @@ def modal_alerta_cartera():
         st.session_state["mostrar_dialogo_expiracion"] = False
         st.rerun()
 
-if st.session_state.get("mostrar_dialogo_expiracion"):
-    modal_alerta_cartera()
 
+@st.dialog("Seleccionar coincidencia en Cartera de Exámenes")
+def modal_seleccionar_candidato_cartera(candidatos):
+    examen_act = st.session_state.get('examen_activo', '')
+    st.markdown(f"Selecciona el examen de la **Cartera** que corresponde a **{examen_act}**:")
+    st.write("")
 
-# --- DIÁLOGO DE CONFIRMACIÓN DE EMPAREJAMIENTO DUDOSO DE CARTERA ---
-@st.dialog("🔍 Confirmar coincidencia con Cartera de Exámenes")
-def modal_confirmar_emparejamiento(nombre_cartera_sugerido, score):
-    st.markdown(f"Se encontró una coincidencia probable del **{score}%** en la Cartera de Exámenes para el examen activo seleccionando:")
-    st.info(f"**Examen Activo:** {st.session_state.get('examen_activo')}\n\n**Cartera de Exámenes:** {nombre_cartera_sugerido}")
-    st.write("¿Deseas vincular este registro para la extracción?")
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if st.button("✓ Sí, utilizar este examen de la Cartera", type="primary", use_container_width=True):
-            st.session_state["cartera_examen_emparejado"] = nombre_cartera_sugerido
-            st.session_state.pop("emparejamiento_dudoso_pendiente", None)
-            st.success(f"¡Vinculado con {nombre_cartera_sugerido}!")
+    if not candidatos:
+        st.info("No se encontraron coincidencias en la Cartera de Exámenes.")
+        if st.button("Cerrar", use_container_width=True):
+            st.session_state.pop("candidatos_cartera_pendientes", None)
             st.rerun()
-    with col_b:
-        if st.button("❌ No, seleccionar manualmente", use_container_width=True):
+        return
+
+    idx_seleccionado = st.radio(
+        "Candidatos con mayor porcentaje de similitud:",
+        options=range(len(candidatos)),
+        format_func=lambda i: f"{candidatos[i][0]}  —  ({candidatos[i][1]}% de coincidencia)"
+    )
+
+    st.write("")
+    col_c1, col_c2 = st.columns(2)
+    with col_c1:
+        if st.button("✓ Vincular examen seleccionado", type="primary", use_container_width=True):
+            nombre_elegido = candidatos[idx_seleccionado][0]
+            st.session_state["cartera_examen_emparejado"] = nombre_elegido
+            st.session_state.pop("candidatos_cartera_pendientes", None)
+            st.success(f"¡Vinculado con «{nombre_elegido}»!")
+            st.rerun()
+
+    with col_c2:
+        if st.button("❌ No vincular ninguno", use_container_width=True):
             st.session_state["cartera_examen_emparejado"] = "Sin vincular"
-            st.session_state.pop("emparejamiento_dudoso_pendiente", None)
+            st.session_state.pop("candidatos_cartera_pendientes", None)
             st.rerun()
 
 
-# --- DIÁLOGO EMERGENTE DE COMPARACIÓN Y RESOLUCIÓN DE CONFLICTOS ---
-@st.dialog("⚖️ Comparación y Resolución de Discrepancias (PDF vs Cartera)")
+@st.dialog("Comparación y Resolución de Discrepancias (PDF vs Cartera)")
 def modal_resolver_conflictos():
     st.markdown(f"Se detectaron discrepancias entre el PDF y la Cartera de Exámenes para el examen **{st.session_state.get('examen_activo', '')}**.")
     st.write("Por favor, revisa cada campo afectado y selecciona qué información deseas conservar:")
@@ -1400,7 +1389,7 @@ def modal_resolver_conflictos():
         with c1:
             st.info(f"📄 **Valor extraído del PDF ({campo}):**\n\n{datos['pdf'] or '(Vacío)'}")
         with c2:
-            st.success(f"🗃️️ **Valor en Cartera SQLite ({campo}):**\n\n{datos['cartera'] or '(Vacío)'}")
+            st.success(f"🗄️ **Valor en Cartera SQLite ({campo}):**\n\n{datos['cartera'] or '(Vacío)'}")
 
         opcion = st.radio(
             f"Selecciona el valor que deseas mantener para el campo «{campo}»:",
@@ -1412,7 +1401,7 @@ def modal_resolver_conflictos():
 
     col_btn1, col_btn2 = st.columns([2, 1])
     with col_btn1:
-        if st.button("💾Aplicar selección y actualizar", type="primary", use_container_width=True):
+        if st.button("💾Aplicar y actualizar ficha", type="primary", use_container_width=True):
             data_actualizada = copy.deepcopy(st.session_state["data_extracted"])
 
             for campo, eleccion in respuestas.items():
@@ -1430,10 +1419,13 @@ def modal_resolver_conflictos():
 
             area_res = st.session_state.get("area_resultado", st.session_state.get("area_activa"))
             aliases_area = get_field_aliases(area_res)
+            user_edited = st.session_state.get("user_edited_fields", set())
             rows_nuevas = []
             for field in aliases_area:
                 value = data_actualizada.get(field, "")
-                if field in ["Nombre LIS", "Laboratorio de procesamiento", "Actualizado por", "Autorizado por"]:
+                if field in user_edited:
+                    state = "🖋 Modificado por usuario"
+                elif field in ["Nombre LIS", "Laboratorio de procesamiento", "Actualizado por", "Autorizado por"]:
                     state = "✓ Ingresado por usuario" if value else "⚠ Pendiente de ingreso"
                 elif field == "Fecha actualización":
                     state = "✓ Asignado por sistema" if value else "⚠ Pendiente de asignación"
@@ -1463,8 +1455,7 @@ def modal_resolver_conflictos():
             st.rerun()
 
 
-# --- DIÁLOGO EMERGENTE DE CONFIRMACIÓN PARA REEMPLAZAR/ACTUALIZAR PLANILLA EN LA HERRAMIENTA ---
-@st.dialog("💾Confirmar actualización de la planilla del área en la herramienta")
+@st.dialog("💾 Confirmar actualización de la planilla del área en la herramienta")
 def modal_confirmar_actualizacion_planilla():
     area_activa = st.session_state.get("area_activa")
     examen_activo = st.session_state.get("examen_activo")
@@ -1473,7 +1464,6 @@ def modal_confirmar_actualizacion_planilla():
     st.markdown(f"Estás a punto de reemplazar la **planilla guardada en la herramienta** para el área **{area_activa}** con los datos recién procesados del examen **{examen_activo}**.")
     st.write("")
 
-    # MÉTRICAS Y DESGLOSE DE CAMBIOS
     col_m1, col_m2, col_m3 = st.columns(3)
     with col_m1:
         st.metric(
@@ -1495,7 +1485,6 @@ def modal_confirmar_actualizacion_planilla():
 
     st.divider()
 
-    # DESGLOSE DE DIFERENCIAS DETALLADAS
     diferencias = comp.get("diferencias", [])
     if diferencias:
         st.markdown("##### 🔍 Resumen de diferencias detectadas:")
@@ -1525,11 +1514,9 @@ def modal_confirmar_actualizacion_planilla():
 
                 ruta_guardado = os.path.join(os.path.dirname(__file__), plantilla_nombre)
 
-                # Sobreescribir archivo en disco
                 with open(ruta_guardado, "wb") as f:
                     f.write(st.session_state["result_bytes"])
 
-                # Actualizar lista local de exámenes si se agregó un nuevo examen/hoja
                 if comp.get("es_nueva_hoja") and examen_activo:
                     actuales = st.session_state["examenes_por_area"].get(area_activa, [])
                     if examen_activo.casefold() not in {x.casefold() for x in actuales}:
@@ -1551,11 +1538,6 @@ def modal_confirmar_actualizacion_planilla():
             st.rerun()
 
 
-def abrir_modal_area(area):
-    st.session_state["area_activa"] = area
-    st.session_state["modal_area_activa"] = area
-
-
 @st.dialog("Seleccionar y administrar exámenes")
 def modal_examenes_area(area):
     st.subheader(area)
@@ -1574,7 +1556,8 @@ def modal_examenes_area(area):
                 st.session_state["area_activa"] = area
                 st.session_state["examen_activo"] = seleccionado
                 st.session_state["cartera_examen_emparejado"] = "Sin vincular"
-                st.session_state.pop("emparejamiento_dudoso_pendiente", None)
+                st.session_state.pop("candidatos_cartera_pendientes", None)
+                st.session_state["mostrar_modal_examenes"] = False
                 st.session_state.pop("modal_area_activa", None)
                 st.rerun()
             else:
@@ -1584,9 +1567,11 @@ def modal_examenes_area(area):
             st.session_state["area_activa"] = area
             st.session_state["examen_activo"] = None
             st.session_state["cartera_examen_emparejado"] = "Sin vincular"
-            st.session_state.pop("emparejamiento_dudoso_pendiente", None)
+            st.session_state.pop("candidatos_cartera_pendientes", None)
+            st.session_state["mostrar_modal_examenes"] = False
             st.session_state.pop("modal_area_activa", None)
             st.rerun()
+
     st.divider()
     with st.expander("➕ Añadir examen"):
         with st.form(f"form_anadir_examen_{area}", clear_on_submit=True):
@@ -1607,7 +1592,8 @@ def modal_examenes_area(area):
                     st.session_state["area_activa"] = area
                     st.session_state["examen_activo"] = nuevo
                     st.session_state["cartera_examen_emparejado"] = "Sin vincular"
-                    st.session_state.pop("emparejamiento_dudoso_pendiente", None)
+                    st.session_state.pop("candidatos_cartera_pendientes", None)
+                    st.session_state["mostrar_modal_examenes"] = False
                     st.session_state.pop("modal_area_activa", None)
                     st.success(f"Se agregó «{nuevo}».")
                     st.rerun()
@@ -1624,6 +1610,7 @@ def modal_examenes_area(area):
                     st.session_state["examen_activo"] = None
                     st.session_state["cartera_examen_emparejado"] = "Sin vincular"
                 if guardar_examenes_por_area(st.session_state["examenes_por_area"]):
+                    st.session_state["mostrar_modal_examenes"] = False
                     st.session_state.pop("modal_area_activa", None)
                     st.success(f"Se quitó «{quitar}» del menú de selección.")
                     st.rerun()
@@ -1633,22 +1620,45 @@ def modal_examenes_area(area):
             st.info("No hay exámenes para eliminar.")
 
 
+def seleccionar_area(area):
+    """Establece el área activa en la sesión y garantiza que los diálogos emergentes se cierren."""
+    st.session_state["area_activa"] = area
+    st.session_state["mostrar_modal_examenes"] = False
+    st.session_state.pop("modal_area_activa", None)
+
+
+# --- GESTOR DE DIÁLOGOS EMERGENTES (GARANTIZA EXCLUSIVIDAD MUTUA) ---
+def ejecutar_gestor_dialogos():
+    """Ejecuta como máximo UN solo diálogo emergente por ciclo para evitar errores de Streamlit."""
+    if st.session_state.get("modal_confirmar_planilla_abierto"):
+        st.session_state["modal_confirmar_planilla_abierto"] = False
+        modal_confirmar_actualizacion_planilla()
+    elif st.session_state.get("modal_conflictos_abierto"):
+        st.session_state["modal_conflictos_abierto"] = False
+        modal_resolver_conflictos()
+    elif "candidatos_cartera_pendientes" in st.session_state:
+        modal_seleccionar_candidato_cartera(st.session_state["candidatos_cartera_pendientes"])
+    elif st.session_state.get("mostrar_modal_examenes") and st.session_state.get("modal_area_activa") in AREA_CONFIG:
+        modal_examenes_area(st.session_state["modal_area_activa"])
+    elif st.session_state.get("mostrar_dialogo_expiracion"):
+        modal_alerta_cartera()
+
+
 # --- SIDEBAR ---
 with st.sidebar:
-    col_izq, col_logo, col_der = st.columns([0.5, 4, 0.5])
-    with col_logo:
-        if os.path.exists(os.path.join(os.path.dirname(__file__), "CRSCO.png")):
-            st.image(os.path.join(os.path.dirname(__file__), "CRSCO.png"), width=240)
+    logo_path = os.path.join(os.path.dirname(__file__), "CRSCO.png")
+    if os.path.exists(logo_path):
+        st.image(logo_path, use_container_width=True)
     st.divider()
     st.header("🧪 Áreas del laboratorio")
-    st.caption("Selecciona un área para abrir su menú de exámenes.")
+    st.caption("Selecciona un área para trabajar.")
     for area in AREA_CONFIG:
         st.button(
             area,
             key=f"abrir_area_{area}",
             use_container_width=True,
             type="primary" if st.session_state.get("area_activa") == area else "secondary",
-            on_click=abrir_modal_area,
+            on_click=seleccionar_area,
             args=(area,),
         )
     st.divider()
@@ -1661,7 +1671,7 @@ with st.sidebar:
     st.caption("Si no cargas uno, se utilizará la plantilla incluida para el área seleccionada.")
     st.divider()
 
-    st.header("🗃️ Base de datos (SQLite)")
+    st.header("💾 Base de datos (SQLite)")
     with st.expander("📊 Cartera de Exámenes", expanded=cartera_expirada):
         st.caption(f"Última actualización: **{msg_cartera}**")
         cartera_file = st.file_uploader("Actualizar Cartera (.xlsx)", type=["xlsx"], key="cartera_uploader_sidebar")
@@ -1684,34 +1694,58 @@ with st.sidebar:
         st.session_state["authenticated"] = False
         st.session_state.pop("result_bytes", None)
         st.session_state.pop("modal_area_activa", None)
+        st.session_state["mostrar_modal_examenes"] = False
         st.session_state["area_activa"] = None
+        st.session_state["cola_pdf_indice"] = 0
         st.rerun()
-
-# Modal del área activa
-if st.session_state.get("modal_area_activa") in AREA_CONFIG:
-    modal_examenes_area(st.session_state["modal_area_activa"])
-
-# Modal de coincidencia dudosa
-if "emparejamiento_dudoso_pendiente" in st.session_state:
-    dudoso = st.session_state["emparejamiento_dudoso_pendiente"]
-    modal_confirmar_emparejamiento(dudoso["nombre"], dudoso["score"])
 
 
 # --- VISTA PRINCIPAL ---
 if st.session_state.get("area_activa") is None:
     st.write("")
     st.info("### 👋 ¡Bienvenido/a a la Herramienta de Extracción de Datos!")
+    
     st.markdown(
         """
         Para comenzar a trabajar, selecciona un **área del laboratorio** en el panel lateral de la izquierda.
 
-        **Pasos para el procesamiento:**
-        1. 🧪 **Selecciona un área** (Microbiología, Hematología, Bioquímica, Derivados, etc.).
-        2. 📋 **Selecciona o añade el examen** en el menú desplegable del área.
-        3. 🔗 **Verifica el emparejamiento automático** con la Cartera de Exámenes (SQLite).
-        4. 📄 **Carga la/s ficha/s técnica/s (PDF)** para extraer, previsualizar y revisar la información automáticamente.
+        #### 📌 Pasos para trabajar:
+        1. 🧪 **Selecciona un Área del laboratorio** en el menú de la izquierda (*Microbiología, Hematología y coagulación, Bioquímica, Hormonas e inmunidad, Derivados*).
+        2. 📋 **Administra y selecciona el examen** que deseas procesar usando el botón **📋 Administrar exámenes**.
+        3. 📄 **Carga las fichas técnicas en PDF** (lote de hasta 5 documentos simultáneos) y organiza la cola de procesamiento si lo deseas.
+        4. ⚙️ **Define los parámetros operacionales** (*Laboratorio de procesamiento, Actualizado por, Autorizado por*) y verifica el emparejamiento con la Cartera en SQLite.
+        5. 🔎 **Haz clic en "Analizar documento activo"** para realizar la extracción automática de texto, OCR y cruce con la Base Maestra de Cartera.
+        6. ✏️ **Revisa y edita la información** en la tabla interactiva, resuelve discrepancias si existen, y actualiza la planilla del área o descarga el Excel consolidado.
         """
     )
+    
+    st.divider()
+    
+    # --- MÓDULO DE ESTADO DE LA CARTERA SQLITE EN LA PÁGINA DE BIENVENIDA ---
+    st.markdown("#### 📊 Estado de la Cartera SQLite:")
+    lista_cartera_home = obtener_lista_cartera_db()
+    total_examenes_cartera = len(lista_cartera_home)
+    fecha_cartera_home, cartera_expirada_home, msg_cartera_home = fecha_actualizacion_cartera()
+
+    if fecha_cartera_home is None or total_examenes_cartera == 0:
+        st.warning("⚠️ **Cartera desactualizada:** No se ha subido ninguna Cartera de Exámenes a la base de datos. Se sugiere cargar el archivo Excel en el menú lateral.")
+    elif cartera_expirada_home:
+        st.warning(f"⚠️ **Cartera desactualizada (más de 6 meses de antigüedad):** Registrada el **{msg_cartera_home}**. Se recomienda actualizar la base de datos subiendo el archivo Excel desde el panel lateral.")
+    else:
+        st.success(f"✅ **Cartera de Exámenes cargada y lista:** Última actualización registrada el **{msg_cartera_home}**.")
+
+    col_stat1, col_stat2 = st.columns(2)
+    with col_stat1:
+        st.metric(
+            label="Exámenes registrados en la Cartera Base",
+            value=f"{total_examenes_cartera} exámenes"
+        )
+    with col_stat2:
+        st.metric(
+            label="Fecha de última actualización",
+            value=msg_cartera_home if fecha_cartera_home else "Sin registro"
+        )
+
 else:
     tab_pdf, tab_export, tab_guide = st.tabs([
         "Extraer información desde un PDF",
@@ -1720,218 +1754,288 @@ else:
     ])
 
     with tab_pdf:
-        st.subheader("Extraer información desde uno o varios PDF")
+        st.subheader("Extraer información desde fichas técnicas (PDF)")
         area_activa = st.session_state.get("area_activa")
         examen_activo = st.session_state.get("examen_activo")
 
-        st.info(f"Área seleccionada: **{area_activa}** · Examen: **{examen_activo or 'sin seleccionar'}**")
+        # CABECERA CON BOTÓN PARA ABRIR LA VENTANA DE ADMINISTRAR EXÁMENES
+        col_info_area, col_btn_admin = st.columns([3, 1])
+        with col_info_area:
+            st.info(f"Área seleccionada: **{area_activa}** · Examen activo: **{examen_activo or 'sin seleccionar'}**")
+        with col_btn_admin:
+            if st.button("📋 Administrar exámenes", type="primary", use_container_width=True, key="btn_abrir_admin_examenes"):
+                st.session_state["modal_area_activa"] = area_activa
+                st.session_state["mostrar_modal_examenes"] = True
+                st.rerun()
 
-        # --- PANEL DE EMPAREJAMIENTO CON LA CARTERA DE EXÁMENES ---
-        st.markdown("##### 🔗 Emparejamiento institucional (Cartera de Exámenes en SQLite)")
-        lista_cartera = obtener_lista_cartera_db()
-
-        if not lista_cartera:
-            st.warning("⚠️ No hay datos cargados en la Cartera de Exámenes. Puedes subir el archivo Excel desde el panel lateral.")
-        else:
-            emparejado_actual = st.session_state.get("cartera_examen_emparejado", "Sin vincular")
-
-            col_emp1, col_emp2 = st.columns([2, 1])
-
-            with col_emp1:
-                opciones_cartera = ["Sin vincular"] + lista_cartera
-                idx_emp = opciones_cartera.index(emparejado_actual) if emparejado_actual in opciones_cartera else 0
-
-                seleccion_manual_cartera = st.selectbox(
-                    "Examen vinculado en la Cartera:",
-                    opciones_cartera,
-                    index=idx_emp,
-                    help="Puedes corregir o cambiar manualmente el examen de la Cartera con el que deseas cruzar la información."
-                )
-                if seleccion_manual_cartera != emparejado_actual:
-                    st.session_state["cartera_examen_emparejado"] = seleccion_manual_cartera
-                    st.rerun()
-
-            with col_emp2:
-                st.write("")
-                st.write("")
-                if st.button("🔍 Buscar coincidencia", key="btn_re_fuzzy", use_container_width=True):
-                    if examen_activo:
-                        nom_cartera, score, _ = buscar_mejor_coincidencia_cartera(examen_activo)
-                        if nom_cartera and score >= 85.0:
-                            st.session_state["cartera_examen_emparejado"] = nom_cartera
-                            st.session_state.pop("emparejamiento_dudoso_pendiente", None)
-                            st.rerun()
-                        elif nom_cartera and score >= 55.0:
-                            st.session_state["emparejamiento_dudoso_pendiente"] = {"nombre": nom_cartera, "score": score}
-                            st.rerun()
-                        else:
-                            st.warning("No se encontró una coincidencia cercana en la Cartera para este examen.")
-                    else:
-                        st.warning("Debes seleccionar primero un examen activo en la barra lateral.")
-
-        st.divider()
-        st.markdown("##### ⚙️ Parámetros operacionales de la ficha")
-
-        c_lab, c_act, c_aut = st.columns(3)
-
-        with c_lab:
-            laboratorios = cargar_laboratorios()
-            actual_lab = st.session_state.get("laboratorio_activo")
-            idx_lab = laboratorios.index(actual_lab) if actual_lab in laboratorios else None
-            sel_lab = st.selectbox(
-                "Laboratorio de procesamiento", laboratorios, index=idx_lab,
-                placeholder="Selecciona laboratorio", key="sel_lab_main"
-            )
-            st.session_state["laboratorio_activo"] = sel_lab
-
-        with c_act:
-            encargados_act = cargar_encargados("actualizado")
-            actual_act = st.session_state.get("actualizado_activo")
-            idx_act = encargados_act.index(actual_act) if actual_act in encargados_act else None
-            sel_act = st.selectbox(
-                "Actualizado por", encargados_act, index=idx_act,
-                placeholder="Selecciona quién actualiza", key="sel_act_main"
-            )
-            st.session_state["actualizado_activo"] = sel_act
-
-        with c_aut:
-            encargados_aut = cargar_encargados("autorizado")
-            actual_aut = st.session_state.get("autorizado_activo")
-            idx_aut = encargados_aut.index(actual_aut) if actual_aut in encargados_aut else None
-            sel_aut = st.selectbox(
-                "Autorizado por", encargados_aut, index=idx_aut,
-                placeholder="Selecciona quién autoriza", key="sel_aut_main"
-            )
-            st.session_state["autorizado_activo"] = sel_aut
-
-        with st.expander("⚙️ Administrar opciones (Añadir / Eliminar de las listas arriba)"):
-            tab_m_lab, tab_m_act, tab_m_aut = st.tabs(["Laboratorios", "Actualizado por", "Autorizado por"])
-
-            with tab_m_lab:
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    with st.form("form_add_lab_inline", clear_on_submit=True):
-                        new_lab = st.text_input("Añadir nuevo laboratorio")
-                        if st.form_submit_button("Guardar laboratorio"):
-                            if guardar_laboratorio(new_lab):
-                                st.session_state["laboratorio_activo"] = new_lab.strip()
-                                st.success(f"Guardado: {new_lab}")
-                                st.rerun()
-                            else:
-                                st.warning("Nombre no válido o ya existente.")
-                with col_b:
-                    labs_del = cargar_laboratorios()
-                    if labs_del:
-                        with st.form("form_del_lab_inline"):
-                            target_del = st.selectbox("Eliminar laboratorio", labs_del)
-                            if st.form_submit_button("Eliminar seleccionado"):
-                                updated = [x for x in labs_del if x.casefold() != target_del.casefold()]
-                                guardar_lista_laboratorios(updated)
-                                if st.session_state.get("laboratorio_activo") == target_del:
-                                    st.session_state["laboratorio_activo"] = None
-                                st.success("Eliminado correctamente.")
-                                st.rerun()
-
-            with tab_m_act:
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    with st.form("form_add_act_inline", clear_on_submit=True):
-                        new_act = st.text_input("Añadir encargado (Actualizado por)")
-                        if st.form_submit_button("Guardar encargado"):
-                            curr = cargar_encargados("actualizado")
-                            if new_act.strip() and new_act.strip().casefold() not in {x.casefold() for x in curr}:
-                                curr.append(new_act.strip())
-                                guardar_encargados("actualizado", curr)
-                                st.session_state["actualizado_activo"] = new_act.strip()
-                                st.success(f"Guardado: {new_act}")
-                                st.rerun()
-                            else:
-                                st.warning("Nombre no válido o ya existente.")
-                with col_b:
-                    acts_del = cargar_encargados("actualizado")
-                    if acts_del:
-                        with st.form("form_del_act_inline"):
-                            target_del = st.selectbox("Eliminar de la lista", acts_del)
-                            if st.form_submit_button("Eliminar seleccionado"):
-                                updated = [x for x in acts_del if x.casefold() != target_del.casefold()]
-                                guardar_encargados("actualizado", updated)
-                                if st.session_state.get("actualizado_activo") == target_del:
-                                    st.session_state["actualizado_activo"] = None
-                                st.success("Eliminado correctamente.")
-                                st.rerun()
-
-            with tab_m_aut:
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    with st.form("form_add_aut_inline", clear_on_submit=True):
-                        new_aut = st.text_input("Añadir encargado (Autorizado por)")
-                        if st.form_submit_button("Guardar encargado"):
-                            curr = cargar_encargados("autorizado")
-                            if new_aut.strip() and new_aut.strip().casefold() not in {x.casefold() for x in curr}:
-                                curr.append(new_aut.strip())
-                                guardar_encargados("autorizado", curr)
-                                st.session_state["autorizado_activo"] = new_aut.strip()
-                                st.success(f"Guardado: {new_aut}")
-                                st.rerun()
-                            else:
-                                st.warning("Nombre no válido o ya existente.")
-                with col_b:
-                    auts_del = cargar_encargados("autorizado")
-                    if auts_del:
-                        with st.form("form_del_aut_inline"):
-                            target_del = st.selectbox("Eliminar de la lista", auts_del)
-                            if st.form_submit_button("Eliminar seleccionado"):
-                                updated = [x for x in auts_del if x.casefold() != target_del.casefold()]
-                                guardar_encargados("autorizado", updated)
-                                if st.session_state.get("autorizado_activo") == target_del:
-                                    st.session_state["autorizado_activo"] = None
-                                st.success("Eliminado correctamente.")
-                                st.rerun()
-
-        st.divider()
-
-        # CARGA MÚLTIPLE DE ARCHIVOS PDF
+        # CARGA DE ARCHIVOS PDF Y CONTROL DE COLA
         pdfs = st.file_uploader(
-            f"Cargar fichas técnicas (Máximo {MAX_PDFS_PERMITIDOS} PDF simultáneos)",
+            f"Cargar fichas técnicas (Lote de hasta {MAX_PDFS_PERMITIDOS} PDF para procesar en cola)",
             type=["pdf"],
             accept_multiple_files=True,
-            help=f"Puedes cargar hasta {MAX_PDFS_PERMITIDOS} archivos PDF para procesar.",
+            help=f"Puedes cargar hasta {MAX_PDFS_PERMITIDOS} archivos PDF para procesarlos de forma individual uno tras otro.",
             key="pdf_uploader"
         )
 
         exceso_archivos = pdfs is not None and len(pdfs) > MAX_PDFS_PERMITIDOS
 
         if exceso_archivos:
-            st.error(f"⚠️ Has seleccionado **{len(pdfs)} archivos**. El límite máximo simultáneo es de **{MAX_PDFS_PERMITIDOS} documentos PDF** para evitar saturar el sistema. Por favor remueve algunos archivos.")
+            st.error(f"⚠️ Has seleccionado **{len(pdfs)} archivos**. El límite máximo simultáneo es de **{MAX_PDFS_PERMITIDOS} documentos PDF** para evitar saturar el sistema.")
 
         if pdfs and not exceso_archivos:
-            # VISTA PREVIA INTERACTIVA CON LUPA
-            with st.expander("📄 Vista previa interactiva de documentos PDF", expanded=True):
-                try:
-                    if len(pdfs) > 1:
-                        pdf_names = [p.name for p in pdfs]
-                        selected_pdf_name = st.selectbox("Selecciona el documento a previsualizar:", pdf_names, key="preview_pdf_selector")
-                        selected_pdf = next(p for p in pdfs if p.name == selected_pdf_name)
-                    else:
-                        selected_pdf = pdfs[0]
+            mapa_pdfs = {pdf.name: pdf for pdf in pdfs}
+            nombres_actuales = [pdf.name for pdf in pdfs]
 
-                    doc_preview = fitz.open(stream=selected_pdf.getvalue(), filetype="pdf")
+            # 1. Sincronizar el estado de Python cuando cambian los archivos cargados (altas o bajas)
+            if ("orden_nombres_pdf" not in st.session_state or 
+                set(st.session_state["orden_nombres_pdf"]) != set(nombres_actuales)):
+                
+                # Conservar el orden de los existentes y descartar eliminados
+                orden_previo = st.session_state.get("orden_nombres_pdf", [])
+                nuevo_orden_filtrado = [nombre for nombre in orden_previo if nombre in mapa_pdfs]
+                
+                # Añadir archivos nuevos que no estuvieran en el estado
+                for nombre in nombres_actuales:
+                    if nombre not in nuevo_orden_filtrado:
+                        nuevo_orden_filtrado.append(nombre)
+                
+                st.session_state["orden_nombres_pdf"] = nuevo_orden_filtrado
+                st.session_state["cola_pdf_indice"] = 0
+                st.session_state.pop("data_extracted", None)
+                st.session_state.pop("user_edited_fields", None)
+                st.session_state.pop("extracted_text", None)
+
+            # 2. Key dinámica única basada en la firma de los archivos presentes.
+            hash_archivos = "_".join(sorted(nombres_actuales))
+            key_sortable_dinamico = f"sortable_queue_{hash_archivos}"
+
+            if len(nombres_actuales) > 1:
+                st.markdown("##### 🔀 Organiza el orden de la cola de procesamiento:")
+                
+                # ESTRUCTURA DE ESTANTERÍA: Números con punto a la izquierda (SIN FONDO, LETRAS BLANCAS) + Fichas arrastrables
+                col_posicion, col_fichas = st.columns([1, 14])
+
+                with col_posicion:
+                    st.caption("Orden")
+                    for i in range(1, len(st.session_state["orden_nombres_pdf"]) + 1):
+                        st.markdown(f'<div class="num-slot">{i}.</div>', unsafe_allow_html=True)
+
+                with col_fichas:
+                    st.caption("Documentos (arrastra de arriba a abajo)")
+                    nuevo_orden_nombres = sort_items(
+                        st.session_state["orden_nombres_pdf"],
+                        direction="vertical",
+                        key=key_sortable_dinamico
+                    )
+
+                if nuevo_orden_nombres and nuevo_orden_nombres != st.session_state["orden_nombres_pdf"]:
+                    st.session_state["orden_nombres_pdf"] = nuevo_orden_nombres
+                    st.session_state["cola_pdf_indice"] = 0
+                    st.session_state.pop("data_extracted", None)
+                    st.session_state.pop("user_edited_fields", None)
+                    st.session_state.pop("extracted_text", None)
+                    st.rerun()
+
+            pdfs_ordenados = [mapa_pdfs[nombre] for nombre in st.session_state["orden_nombres_pdf"] if nombre in mapa_pdfs]
+
+            total_pdfs = len(pdfs_ordenados)
+            idx_actual = st.session_state.get("cola_pdf_indice", 0)
+
+            if idx_actual >= total_pdfs:
+                st.session_state["cola_pdf_indice"] = 0
+                idx_actual = 0
+
+            pdf_activo = pdfs_ordenados[idx_actual]
+
+            # BANNER DE ESTADO Y BARRA DE PROGRESO DE LA COLA
+            st.markdown(f"""
+            <div class="banner-cola-trabajo">
+                📚 <b>COLA DE PROCESAMIENTO ACTIVA:</b> Documento <b>{idx_actual + 1}</b> de <b>{total_pdfs}</b><br>
+                <span style="font-size: 0.90rem;">📄 Archivo en revisión actual: <b>{pdf_activo.name}</b></span>
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.progress((idx_actual + 1) / total_pdfs)
+
+            st.divider()
+
+            # --- PANEL DE EMPAREJAMIENTO CON LA CARTERA DE EXÁMENES ---
+            st.markdown("##### 🔗 Emparejamiento institucional (Cartera de Exámenes en SQLite)")
+            lista_cartera = obtener_lista_cartera_db()
+
+            if not lista_cartera:
+                st.warning("⚠️ No hay datos cargados en la Cartera de Exámenes. Puedes subir el archivo Excel desde el panel lateral.")
+            else:
+                emparejado_actual = st.session_state.get("cartera_examen_emparejado", "Sin vincular")
+
+                col_emp1, col_emp2 = st.columns([2, 1])
+
+                with col_emp1:
+                    opciones_cartera = ["Sin vincular"] + lista_cartera
+                    idx_emp = opciones_cartera.index(emparejado_actual) if emparejado_actual in opciones_cartera else 0
+
+                    seleccion_manual_cartera = st.selectbox(
+                        "Examen vinculado en la Cartera:",
+                        opciones_cartera,
+                        index=idx_emp,
+                        help="Puedes corregir o cambiar manualmente el examen de la Cartera con el que deseas cruzar la información."
+                    )
+                    if seleccion_manual_cartera != emparejado_actual:
+                        st.session_state["cartera_examen_emparejado"] = seleccion_manual_cartera
+                        st.rerun()
+
+                with col_emp2:
+                    st.write("")
+                    st.write("")
+                    if st.button("🔍 **Buscar coincidencia**", key="btn_re_fuzzy", use_container_width=False):
+                        if examen_activo:
+                            candidatos = buscar_top_coincidencias_cartera(examen_activo, top_n=5)
+                            if candidatos:
+                                st.session_state["candidatos_cartera_pendientes"] = candidatos
+                                st.rerun()
+                            else:
+                                st.warning("No se encontraron coincidencias en la Cartera para este examen.")
+                        else:
+                            st.warning("Debes seleccionar primero un examen activo usando el botón 'Administrar exámenes'.")
+
+            st.divider()
+            st.markdown("##### ⚙️ Parámetros operacionales de la ficha")
+
+            c_lab, c_act, c_aut = st.columns(3)
+
+            with c_lab:
+                laboratorios = cargar_laboratorios()
+                actual_lab = st.session_state.get("laboratorio_activo")
+                idx_lab = laboratorios.index(actual_lab) if actual_lab in laboratorios else None
+                sel_lab = st.selectbox(
+                    "Laboratorio de procesamiento", laboratorios, index=idx_lab,
+                    placeholder="Selecciona laboratorio", key="sel_lab_main"
+                )
+                st.session_state["laboratorio_activo"] = sel_lab
+
+            with c_act:
+                encargados_act = cargar_encargados("actualizado")
+                actual_act = st.session_state.get("actualizado_activo")
+                idx_act = encargados_act.index(actual_act) if actual_act in encargados_act else None
+                sel_act = st.selectbox(
+                    "Actualizado por", encargados_act, index=idx_act,
+                    placeholder="Selecciona quién actualiza", key="sel_act_main"
+                )
+                st.session_state["actualizado_activo"] = sel_act
+
+            with c_aut:
+                encargados_aut = cargar_encargados("autorizado")
+                actual_aut = st.session_state.get("autorizado_activo")
+                idx_aut = encargados_aut.index(actual_aut) if actual_aut in encargados_aut else None
+                sel_aut = st.selectbox(
+                    "Autorizado por", encargados_aut, index=idx_aut,
+                    placeholder="Selecciona quién autoriza", key="sel_aut_main"
+                )
+                st.session_state["autorizado_activo"] = sel_aut
+
+            with st.expander("⚙️ Administrar opciones (Añadir / Eliminar de las listas arriba)"):
+                tab_m_lab, tab_m_act, tab_m_aut = st.tabs(["Laboratorios", "Actualizado por", "Autorizado por"])
+
+                with tab_m_lab:
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        with st.form("form_add_lab_inline", clear_on_submit=True):
+                            new_lab = st.text_input("Añadir nuevo laboratorio")
+                            if st.form_submit_button("Guardar laboratorio"):
+                                if guardar_laboratorio(new_lab):
+                                    st.session_state["laboratorio_activo"] = new_lab.strip()
+                                    st.success(f"Guardado: {new_lab}")
+                                    st.rerun()
+                                else:
+                                    st.warning("Nombre no válido o ya existente.")
+                    with col_b:
+                        labs_del = cargar_laboratorios()
+                        if labs_del:
+                            with st.form("form_del_lab_inline"):
+                                target_del = st.selectbox("Eliminar laboratorio", labs_del)
+                                if st.form_submit_button("Eliminar seleccionado"):
+                                    updated = [x for x in labs_del if x.casefold() != target_del.casefold()]
+                                    guardar_lista_laboratorios(updated)
+                                    if st.session_state.get("laboratorio_activo") == target_del:
+                                        st.session_state["laboratorio_activo"] = None
+                                    st.success("Eliminado correctamente.")
+                                    st.rerun()
+
+                with tab_m_act:
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        with st.form("form_add_act_inline", clear_on_submit=True):
+                            new_act = st.text_input("Añadir encargado (Actualizado por)")
+                            if st.form_submit_button("Guardar encargado"):
+                                curr = cargar_encargados("actualizado")
+                                if new_act.strip() and new_act.strip().casefold() not in {x.casefold() for x in curr}:
+                                    curr.append(new_act.strip())
+                                    guardar_encargados("actualizado", curr)
+                                    st.session_state["actualizado_activo"] = new_act.strip()
+                                    st.success(f"Guardado: {new_act}")
+                                    st.rerun()
+                                else:
+                                    st.warning("Nombre no válido o ya existente.")
+                    with col_b:
+                        acts_del = cargar_encargados("actualizado")
+                        if acts_del:
+                            with st.form("form_del_act_inline"):
+                                target_del = st.selectbox("Eliminar de la lista", acts_del)
+                                if st.form_submit_button("Eliminar seleccionado"):
+                                    updated = [x for x in acts_del if x.casefold() != target_del.casefold()]
+                                    guardar_encargados("actualizado", updated)
+                                    if st.session_state.get("actualizado_activo") == target_del:
+                                        st.session_state["actualizado_activo"] = None
+                                    st.success("Eliminado correctamente.")
+                                    st.rerun()
+
+                with tab_m_aut:
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        with st.form("form_add_aut_inline", clear_on_submit=True):
+                            new_aut = st.text_input("Añadir encargado (Autorizado por)")
+                            if st.form_submit_button("Guardar encargado"):
+                                curr = cargar_encargados("autorizado")
+                                if new_aut.strip() and new_aut.strip().casefold() not in {x.casefold() for x in curr}:
+                                    curr.append(new_aut.strip())
+                                    guardar_encargados("autorizado", curr)
+                                    st.session_state["autorizado_activo"] = new_aut.strip()
+                                    st.success(f"Guardado: {new_aut}")
+                                    st.rerun()
+                                else:
+                                    st.warning("Nombre no válido o ya existente.")
+                    with col_b:
+                        auts_del = cargar_encargados("autorizado")
+                        if auts_del:
+                            with st.form("form_del_aut_inline"):
+                                target_del = st.selectbox("Eliminar de la lista", auts_del)
+                                if st.form_submit_button("Eliminar seleccionado"):
+                                    updated = [x for x in auts_del if x.casefold() != target_del.casefold()]
+                                    guardar_encargados("autorizado", updated)
+                                    if st.session_state.get("autorizado_activo") == target_del:
+                                        st.session_state["autorizado_activo"] = None
+                                    st.success("Eliminado correctamente.")
+                                    st.rerun()
+
+            st.divider()
+
+            # VISTA PREVIA INTERACTIVA CON LUPA (MOSTRANDO DIRECTAMENTE EL DOCUMENTO ACTIVO EN COLA)
+            with st.expander("📄 Vista previa interactiva del documento PDF en revisión", expanded=True):
+                try:
+                    doc_preview = fitz.open(stream=pdf_activo.getvalue(), filetype="pdf")
                     num_paginas = len(doc_preview)
-                    st.caption(f"Visualizando: **{selected_pdf.name}** | Páginas: **{num_paginas}**")
+                    st.caption(f"Visualizando documento activo en cola: **{pdf_activo.name}** | Páginas: **{num_paginas}**")
 
                     col_prev1, col_prev2, col_prev3 = st.columns([2, 1, 1])
 
                     with col_prev1:
-                        if num_paginas > 1:
-                            pag_seleccionada = st.slider("Página a visualizar", 1, num_paginas, 1, key="pdf_page_slider")
-                        else:
-                            pag_seleccionada = 1
+                        pag_seleccionada = st.slider("Página a visualizar", 1, num_paginas, 1, key=f"pdf_page_slider_{idx_actual}") if num_paginas > 1 else 1
 
                     with col_prev2:
-                        zoom_level = st.slider("🔍 Ancho de vista (%)", min_value=50, max_value=180, value=100, step=10, key="pdf_zoom_slider")
+                        zoom_level = st.slider("🔍 Ancho de vista (%)", min_value=50, max_value=180, value=100, step=10, key=f"pdf_zoom_slider_{idx_actual}")
 
                     with col_prev3:
-                        magnify_scale = st.slider("🔎 Potencia Lupa (x)", min_value=1.5, max_value=3.5, value=2.2, step=0.3, key="pdf_magnify_slider")
+                        magnify_scale = st.slider("🔎 Potencia Lupa (x)", min_value=1.5, max_value=3.5, value=2.2, step=0.3, key=f"pdf_magnify_slider_{idx_actual}")
 
                     page = doc_preview[pag_seleccionada - 1]
                     pix = page.get_pixmap(dpi=150)
@@ -1982,16 +2086,21 @@ else:
                 except Exception as err_preview:
                     st.error(f"No se pudo generar la vista previa del PDF: {err_preview}")
 
-            # BOTÓN DE ANÁLISIS E INTEGRACIÓN CON LA CARTERA DE EXÁMENES (SQLITE)
-            if st.button("🔎 Analizar documentos", type="primary", key="analyze_pdf", disabled=exceso_archivos):
+            # BOTÓN DE ANÁLISIS
+            st.write("")
+            col_btn_analisis, col_sp1 = st.columns([1.5, 2])
+            with col_btn_analisis:
+                iniciar_analisis = st.button("🔎 Analizar documento activo", type="primary", key="analyze_pdf", disabled=exceso_archivos, use_container_width=False)
+
+            if iniciar_analisis:
                 if not examen_activo:
-                    st.warning("Primero abre el menú del área en el panel lateral y selecciona un examen.")
+                    st.warning("Selecciona un examen antes de continuar")
                 elif not st.session_state.get("laboratorio_activo"):
                     st.warning("Selecciona un laboratorio de procesamiento antes de analizar.")
                 else:
                     try:
-                        st.session_state.pop("result_bytes", None)
                         st.session_state.pop("data_extracted", None)
+                        st.session_state.pop("user_edited_fields", None)
                         st.session_state.pop("extracted_text", None)
                         st.session_state.pop("conflictos_pendientes", None)
 
@@ -2001,7 +2110,9 @@ else:
                         aliases_area = get_field_aliases(area_activa)
                         ruta_plantilla = os.path.join(os.path.dirname(__file__), config["template"] or "")
 
-                        if template is not None:
+                        if "result_bytes" in st.session_state and idx_actual > 0:
+                            template_bytes_init = st.session_state["result_bytes"]
+                        elif template is not None:
                             template_bytes_init = template.getvalue()
                         elif config["template"] and os.path.exists(ruta_plantilla):
                             with open(ruta_plantilla, "rb") as f:
@@ -2028,72 +2139,63 @@ else:
                         if info_cartera and info_cartera.get("Código"):
                             datos_sobrescribir["Código"] = info_cartera["Código"]
 
-                        current_template_bytes = template_bytes_init
-                        last_extracted_data = {}
-                        last_extracted_text = ""
                         campos_comparables = ["Preparación del paciente", "Equipamiento utilizado", "Plazo entrega resultados"]
 
-                        for pdf_item in pdfs:
-                            raw_text, _ = extract_pdf_text(pdf_item.getvalue(), pdf_item.name, examen_activo)
-                            parsed_pdf_data = infer_name_code(raw_text, parse_labeled_text(raw_text, aliases_area, examen_activo))
+                        raw_text, _ = extract_pdf_text(pdf_activo.getvalue(), pdf_activo.name, examen_activo)
+                        parsed_pdf_data = infer_name_code(raw_text, parse_labeled_text(raw_text, aliases_area, examen_activo))
 
-                            if info_cartera:
-                                for campo in campos_comparables:
-                                    val_pdf = str(parsed_pdf_data.get(campo, "")).strip()
-                                    val_cartera = str(info_cartera.get(campo, "")).strip()
+                        if info_cartera:
+                            for campo in campos_comparables:
+                                val_pdf = str(parsed_pdf_data.get(campo, "")).strip()
+                                val_cartera = str(info_cartera.get(campo, "")).strip()
 
-                                    if val_pdf and val_cartera and val_pdf.casefold() != val_cartera.casefold():
-                                        conflictos[campo] = {"pdf": val_pdf, "cartera": val_cartera}
-                                    elif not val_pdf and val_cartera:
-                                        datos_sobrescribir[campo] = val_cartera
+                                if val_pdf and val_cartera and val_pdf.casefold() != val_cartera.casefold():
+                                    conflictos[campo] = {"pdf": val_pdf, "cartera": val_cartera}
+                                elif not val_pdf and val_cartera:
+                                    datos_sobrescribir[campo] = val_cartera
 
-                            out_bytes, data, target, score, reason, method, text = process(
-                                pdf_item.getvalue(), pdf_item.name, current_template_bytes,
-                                st.session_state.get("laboratorio_activo", ""),
-                                examen_activo, aliases_area,
-                                st.session_state.get("actualizado_activo", ""),
-                                st.session_state.get("autorizado_activo", ""),
-                                datos_sobrescribir=datos_sobrescribir
-                            )
-                            current_template_bytes = out_bytes
-                            last_extracted_data.update({k: v for k, v in data.items() if v})
-                            last_extracted_text += f"\n--- Documento: {pdf_item.name} ---\n" + text
+                        out_bytes, data, target, score, reason, method, text = process(
+                            pdf_activo.getvalue(), pdf_activo.name, template_bytes_init,
+                            st.session_state.get("laboratorio_activo", ""),
+                            examen_activo, aliases_area,
+                            st.session_state.get("actualizado_activo", ""),
+                            st.session_state.get("autorizado_activo", ""),
+                            datos_sobrescribir=datos_sobrescribir
+                        )
 
-                        st.session_state["result_bytes"] = current_template_bytes
-                        st.session_state["data_extracted"] = last_extracted_data
-                        st.session_state["extracted_text"] = last_extracted_text
+                        st.session_state["result_bytes"] = out_bytes
+                        st.session_state["data_extracted"] = copy.deepcopy(data)
+                        st.session_state["user_edited_fields"] = set()
+                        st.session_state["extracted_text"] = text
                         st.session_state["area_resultado"] = area_activa
 
                         if conflictos:
                             st.session_state["conflictos_pendientes"] = conflictos
                             st.session_state["modal_conflictos_abierto"] = True
 
-                        st.success(f"¡Se procesaron correctamente {len(pdfs)} archivo(s) PDF!")
+                        st.success(f"¡Se procesó correctamente el archivo «{pdf_activo.name}»!")
                         st.rerun()
 
                     except Exception as e:
-                        st.error(f"No se pudo analizar los documentos: {e}")
+                        st.error(f"No se pudo analizar el documento: {e}")
         elif not pdfs:
-            st.info("Carga uno o más PDF para comenzar la extracción.")
+            st.session_state.pop("result_bytes", None)
+            st.session_state.pop("data_extracted", None)
+            st.session_state.pop("orden_nombres_pdf", None)
+            st.info("Carga uno o más PDF para comenzar la extracción en cola.")
 
-        # DISPARO CONTROLADO DE LAS VENTANAS EMERGENTES
-        if st.session_state.get("modal_conflictos_abierto"):
-            st.session_state["modal_conflictos_abierto"] = False
-            modal_resolver_conflictos()
-
-        if st.session_state.get("modal_confirmar_planilla_abierto"):
-            st.session_state["modal_confirmar_planilla_abierto"] = False
-            modal_confirmar_actualizacion_planilla()
-
-        if "result_bytes" in st.session_state:
+        if "data_extracted" in st.session_state and "result_bytes" in st.session_state and pdfs:
             data = st.session_state.get("data_extracted", {})
+            user_edited = st.session_state.get("user_edited_fields", set())
             area_res = st.session_state.get("area_resultado", area_activa)
             aliases_area = get_field_aliases(area_res)
 
-            st.subheader("Resultado de extracción y revisión interactiva")
+            pdfs_ordenados_rev = [mapa_pdfs[nombre] for nombre in st.session_state.get("orden_nombres_pdf", []) if nombre in mapa_pdfs] if 'mapa_pdfs' in locals() else pdfs
+            pdf_actual_nombre = pdfs_ordenados_rev[st.session_state.get('cola_pdf_indice', 0)].name if pdfs_ordenados_rev else "documento activo"
+
+            st.subheader(f"Revisión e información extraída de «{pdf_actual_nombre}»")
             st.metric("Campos encontrados", sum(bool(v) for v in data.values()))
 
-            # BANNER INFORMATIVO SI QUEDAN DISCREPANCIAS SIN RESOLVER
             if "conflictos_pendientes" in st.session_state:
                 st.warning("⚠️ **Existen discrepancias detectadas entre la información extraída del PDF y la Cartera de Exámenes.**")
                 col_dis1, col_dis2 = st.columns([1, 2])
@@ -2110,7 +2212,9 @@ else:
             rows = []
             for field in aliases_area:
                 value = data.get(field, "")
-                if field in ["Nombre LIS", "Laboratorio de procesamiento", "Actualizado por", "Autorizado por"]:
+                if field in user_edited:
+                    state = "🖋 Modificado por usuario"
+                elif field in ["Nombre LIS", "Laboratorio de procesamiento", "Actualizado por", "Autorizado por"]:
                     state = "✓ Ingresado por usuario" if value else "⚠ Pendiente de ingreso"
                 elif field == "Fecha actualización":
                     state = "✓ Asignado por sistema" if value else "⚠ Pendiente de asignación"
@@ -2128,6 +2232,8 @@ else:
                 <div style="font-size: 0.85rem; color: #6c757d; line-height: 1.6; margin-bottom: 12px;">
                     <span style="background-color: #B7F7C1; color: #124D20; padding: 2px 8px; border-radius: 4px; font-weight: bold;">Verde:</span> Campo completado correctamente.
                     &nbsp;&nbsp;
+                    <span style="background-color: #BAE6FD; color: #0369A1; padding: 2px 8px; border-radius: 4px; font-weight: bold;">Azul:</span> 🖋 Modificado por usuario.
+                    &nbsp;&nbsp;
                     <span style="background-color: #FFF0B3; color: #6B4D00; padding: 2px 8px; border-radius: 4px; font-weight: bold;">Amarillo:</span> Campo pendiente de revisión / no encontrado.
                     <br><br>
                     💡 <b>Haz doble clic sobre cualquier celda de la columna "Información extraída" para editar su contenido directamente en la tabla.</b>
@@ -2139,7 +2245,15 @@ else:
             get_row_style = JsCode("""
             function(params) {
                 var val = params.data['Información extraída'];
-                if (val && val.toString().trim() !== '') {
+                var estado = params.data['Estado'];
+                
+                if (val && val.toString().trim() !== '' && estado === '🖋 Modificado por usuario') {
+                    return {
+                        'backgroundColor': '#BAE6FD',
+                        'color': '#0369A1',
+                        'fontWeight': '600'
+                    };
+                } else if (val && val.toString().trim() !== '') {
                     return {
                         'backgroundColor': '#B7F7C1',
                         'color': '#124D20',
@@ -2188,6 +2302,28 @@ else:
 
             grid_options = gb.build()
             grid_options['getRowStyle'] = get_row_style
+            
+            grid_options['onCellValueChanged'] = JsCode("""
+            function(params) {
+                if (params.column && params.column.colDef && params.column.colDef.field === 'Información extraída') {
+                    var newVal = params.newValue != null ? params.newValue.toString().trim() : '';
+                    
+                    if (newVal === '') {
+                        var campo = params.data['Campo'];
+                        if (['Nombre LIS', 'Laboratorio de procesamiento', 'Actualizado por', 'Autorizado por'].includes(campo)) {
+                            params.node.setDataValue('Estado', '⚠ Pendiente de ingreso');
+                        } else if (campo === 'Fecha actualización') {
+                            params.node.setDataValue('Estado', '⚠ Pendiente de asignación');
+                        } else {
+                            params.node.setDataValue('Estado', '⚠ No encontrado');
+                        }
+                    } else {
+                        params.node.setDataValue('Estado', '🖋 Modificado por usuario');
+                    }
+                    params.api.refreshCells({rowNodes: [params.node], force: true});
+                }
+            }
+            """)
 
             filas_cant = len(df_base)
             altura_tabla = min(max(filas_cant * 42 + 45, 250), 650)
@@ -2205,23 +2341,16 @@ else:
 
             edited_df = pd.DataFrame(grid_response['data'])
 
-            for idx, row in edited_df.iterrows():
-                val = str(row["Información extraída"] or '').strip()
-                field = row["Campo"]
-                if val:
-                    if field in ["Nombre LIS", "Laboratorio de procesamiento", "Actualizado por", "Autorizado por"]:
-                        edited_df.at[idx, "Estado"] = "✓ Ingresado por usuario"
-                    elif field == "Fecha actualización":
-                        edited_df.at[idx, "Estado"] = "✓ Asignado por sistema"
+            if "data_extracted" in st.session_state:
+                for idx, row in edited_df.iterrows():
+                    field = row["Campo"]
+                    val_editado = str(row["Información extraída"] or '').strip()
+                    st.session_state["data_extracted"][field] = val_editado
+                    
+                    if row["Estado"] == "🖋 Modificado por usuario" and val_editado:
+                        st.session_state.setdefault("user_edited_fields", set()).add(field)
                     else:
-                        edited_df.at[idx, "Estado"] = "✓ Encontrado"
-                else:
-                    if field in ["Nombre LIS", "Laboratorio de procesamiento", "Actualizado por", "Autorizado por"]:
-                        edited_df.at[idx, "Estado"] = "⚠ Pendiente de ingreso"
-                    elif field == "Fecha actualización":
-                        edited_df.at[idx, "Estado"] = "⚠ Pendiente de asignación"
-                    else:
-                        edited_df.at[idx, "Estado"] = "⚠ No encontrado"
+                        st.session_state.get("user_edited_fields", set()).discard(field)
 
             updated_excel_bytes = aplicar_ediciones_a_excel(
                 st.session_state["result_bytes"],
@@ -2231,31 +2360,54 @@ else:
             st.session_state["result_bytes"] = updated_excel_bytes
 
             st.write("")
-            st.subheader("Opciones de guardado y exportación")
-            st.write("Puedes descargar el archivo Excel actualizado o guardarlo directamente como la nueva versión oficial del área en la herramienta.")
+            st.subheader("Opciones de guardado y avance de cola")
 
-            col_down, col_update = st.columns(2)
+            col_down, col_update, col_next = st.columns(3)
 
             with col_down:
                 st.download_button(
-                    "📥 Descargar Excel actualizado (.xlsx)", type="secondary",
-                    data=updated_excel_bytes,
-                    file_name=f"Fichas_tecnicas_{st.session_state.get('area_resultado', 'Area').replace(' ', '_')}_actualizadas.xlsx",
+                    "📥 Descargar Excel consolidado (.xlsx)", type="secondary",
+                    data=st.session_state["result_bytes"],
+                    file_name=f"Ficha_Acumulada_{area_activa or 'lote'}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                     key="download_updated_xlsx",
+                    help="Descarga el libro Excel con todas las hojas de los exámenes procesados hasta ahora en este lote."
                 )
 
             with col_update:
-                if st.button("💾 Actualizar planilla del área en la herramienta", type="primary", use_container_width=True, key="btn_trigger_save_template"):
+                if st.button("💾 Actualizar en herramienta", type="primary", use_container_width=True, key="btn_trigger_save_template"):
                     bytes_iniciales = st.session_state.get("bytes_plantilla_inicial")
                     st.session_state["comparacion_planilla_detalles"] = comparar_plantillas_excel(
                         bytes_iniciales,
-                        updated_excel_bytes,
+                        st.session_state["result_bytes"],
                         examen_activo or ""
                     )
                     st.session_state["modal_confirmar_planilla_abierto"] = True
                     st.rerun()
+
+            with col_next:
+                idx_actual = st.session_state.get("cola_pdf_indice", 0)
+                total_pdfs = len(pdfs_ordenados_rev) if 'pdfs_ordenados_rev' in locals() and pdfs_ordenados_rev else 0
+                
+                if idx_actual < total_pdfs - 1:
+                    if st.button(f"➡️ Finalizar y pasar al examen ({idx_actual + 2}/{total_pdfs})", type="secondary", use_container_width=True):
+                        st.session_state["cola_pdf_indice"] = idx_actual + 1
+
+                        st.session_state["examen_activo"] = None
+                        st.session_state["cartera_examen_emparejado"] = "Sin vincular"
+                        st.session_state.pop("candidatos_cartera_pendientes", None)
+
+                        st.session_state.pop("data_extracted", None)
+                        st.session_state.pop("user_edited_fields", None)
+                        st.session_state.pop("extracted_text", None)
+
+                        st.session_state["mostrar_modal_examenes"] = False
+                        st.session_state.pop("modal_area_activa", None)
+
+                        st.rerun()
+                else:
+                    st.success("🎉 ¡Has completado la cola de exámenes! Puedes descargar el Excel consolidado con el botón de la izquierda.")
 
             with st.expander("Ver texto bruto extraído"):
                 st.text_area("Texto", st.session_state.get("extracted_text", ""), height=350, key="raw_extracted_text")
@@ -2302,3 +2454,6 @@ else:
 
     with tab_guide:
         guide_tab()
+
+# --- EJECUCIÓN FINAL DEL GESTOR DE DIÁLOGOS EMERGENTES ---
+ejecutar_gestor_dialogos()
