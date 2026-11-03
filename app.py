@@ -1489,11 +1489,8 @@ def modal_confirmar_actualizacion_planilla():
     if diferencias:
         st.markdown("##### 🔍 Resumen de diferencias detectadas:")
         df_dif = pd.DataFrame(diferencias)
-        st.dataframe(
-            df_dif[["Campo", "Tipo de cambio", "Valor anterior", "Valor nuevo"]],
-            use_container_width=True,
-            hide_index=True
-        )
+        # Se reemplaza st.dataframe por st.table para evitar descarga de módulos JS externos
+        st.table(df_dif[["Campo", "Tipo de cambio", "Valor anterior", "Valor nuevo"]])
     else:
         st.info("ℹ️ No se detectaron diferencias en los campos. La versión actual y la nueva son idénticas.")
 
