@@ -216,26 +216,41 @@ def fecha_actualizacion_cartera():
 LABORATORIOS_PREDETERMINADOS = [
     "Laboratorio CRS Cordillera Oriente",
 ]
-LABORATORIOS_FILE = os.path.join(os.path.dirname(__file__), "laboratorios.json")
 
+def obtener_ruta_laboratorios():
+    """Busca el archivo laboratorios.json sin importar mayúsculas o minúsculas en el nombre."""
+    dir_actual = os.path.dirname(__file__) or "."
+    for archivo in os.listdir(dir_actual):
+        if archivo.lower() == "laboratorios.json":
+            return os.path.join(dir_actual, archivo)
+    return os.path.join(dir_actual, "laboratorios.json")
 
 def cargar_laboratorios():
-    """Carga la lista de laboratorios guardados."""
-    try:
-        with open(LABORATORIOS_FILE, "r", encoding="utf-8") as archivo:
-            guardados = json.load(archivo)
-        if isinstance(guardados, dict) and isinstance(guardados.get("laboratorios"), list):
-            lista = guardados["laboratorios"]
-        elif isinstance(guardados, list):
-            lista = LABORATORIOS_PREDETERMINADOS + guardados
-        else:
-            lista = LABORATORIOS_PREDETERMINADOS
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        lista = LABORATORIOS_PREDETERMINADOS
+    """Carga la lista de laboratorios combinando los predeterminados y el archivo JSON."""
+    lista_cargada = []
+    ruta_file = obtener_ruta_laboratorios()
+
+    if os.path.exists(ruta_file):
+        try:
+            with open(ruta_file, "r", encoding="utf-8") as archivo:
+                contenido = archivo.read()
+                # Elimina comas finales sobrantes antes del cierre de corchete/llave
+                contenido_limpio = re.sub(r',\s*([\]}])', r'\1', contenido)
+                guardados = json.loads(contenido_limpio)
+
+            if isinstance(guardados, dict) and isinstance(guardados.get("laboratorios"), list):
+                lista_cargada = guardados["laboratorios"]
+            elif isinstance(guardados, list):
+                lista_cargada = guardados
+        except Exception:
+            lista_cargada = []
+
+    # Combina el laboratorio por defecto con los leídos del JSON
+    todos = LABORATORIOS_PREDETERMINADOS + lista_cargada
 
     laboratorios = []
     vistos = set()
-    for nombre in lista:
+    for nombre in todos:
         nombre = str(nombre).strip()
         if nombre and nombre.casefold() not in vistos:
             laboratorios.append(nombre)
@@ -253,7 +268,8 @@ def guardar_lista_laboratorios(laboratorios):
             limpia.append(nombre)
             vistos.add(nombre.casefold())
     try:
-        with open(LABORATORIOS_FILE, "w", encoding="utf-8") as archivo:
+        ruta_file = obtener_ruta_laboratorios()
+        with open(ruta_file, "w", encoding="utf-8") as archivo:
             json.dump({"laboratorios": limpia}, archivo, ensure_ascii=False, indent=2)
         return True
     except OSError:
