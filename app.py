@@ -751,7 +751,7 @@ FIELD_ALIASES_HEMATOLOGIA = {
     'Criterios de rechazo': ['Rechazo', 'Criterios de rechazo', 'muestra coagulada', 'muestra hemolisada', 'volumen insuficiente', 'relación anticoagulante'],
     'Método de procesamiento': ['Principio del test','metodo utilizado', 'método utilizado', 'metodo de procesamiento', 'metodologia'],
     'Test incluidos': ['test incluidos', 'pruebas incluidas', 'fórmula leucocitaria', 'indices hematimetricos'],
-    'Valores de referencia': ['valores teóricos'],
+    'Valores de referencia': ['valores teóricos', 'Valores teóricos'],
     'Valor crítico': ['valor critico', 'valor crítico', 'plaquetopenia severa', 'inr crítico', 'hemoglobina crítica'],
     'Límite de detección': ['limite de detección:', 'límite de detección', 'rango de linealidad'],
     'Equipamiento utilizado': ['equipamiento utilizado', 'equipo utilizado', 'contador hematologico', 'coagulometro', 'sysmex', 'stago'],
