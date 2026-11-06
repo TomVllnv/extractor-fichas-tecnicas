@@ -21,7 +21,7 @@ AREA_CONFIG = {
     "Hematología y coagulación": {"template": "plantilla_hematologia.xlsx"},
     "Bioquímica": {"template": "plantilla_bioquimica.xlsx"},
     "Hormonas e inmunidad": {"template": None},
-    "Derivados": {"template": ""plantilla_derivados.xlsx"},
+    "Derivados": {"template": "plantilla_derivados.xlsx"},
 }
 
 
