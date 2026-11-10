@@ -1,4 +1,4 @@
-"""Fuentes documentales controladas de Testeo.
+"""Fuentes documentales controladas de la Herramienta de extracción de datos para laboratorio.
 
 - Normas Generales de Toma de Muestras: cuatro valores por defecto.
 - Cartera de Acreditación: seis valores por prestación (clave «Prestación»).
@@ -13,6 +13,7 @@ import io
 import re
 import sqlite3
 import hashlib
+from contextlib import closing, nullcontext
 import unicodedata
 import zipfile
 import xml.etree.ElementTree as ET
@@ -42,6 +43,39 @@ MAPA_ACREDITACION = {
     "Criterios de rechazo": "Criterios de rechazo · texto",
 }
 CAMPOS_CONTROLADOS = tuple(MAPA_ACREDITACION) + CAMPOS_MANUAL
+
+# Orden institucional de consulta para cada campo. Se usa también en el panel
+# de procedencia, pero NO altera los valores ni los estados de la extracción.
+PRIORIDAD_FUENTES_POR_CAMPO = {
+    "Preparación del paciente": (
+        "Cartera de Exámenes del CRS",
+        "Cartera de acreditación",
+        "Normas Generales de Toma de Muestras",
+    ),
+    "Muestra requerida y recipiente": ("Cartera de acreditación",),
+    "Procedimiento de toma de muestras": (
+        "Cartera de acreditación", "Normas Generales de Toma de Muestras",
+    ),
+    "Rotulación": ("Cartera de acreditación", "Normas Generales de Toma de Muestras"),
+    "Condiciones de envío al Laboratorio": ("Cartera de acreditación",),
+    "Criterios de rechazo": ("Cartera de acreditación", "Normas Generales de Toma de Muestras"),
+    "Recepción de muestras": ("Manual de toma de muestras",),
+    "Procesamiento de muestras": ("Manual de toma de muestras",),
+}
+
+
+def identificar_fuente_procedencia(texto_origen):
+    """Convierte el origen real (incluido estado de Acreditación) en su fuente."""
+    origen = str(texto_origen or "").strip()
+    if origen.startswith("Cartera de Acreditación"):
+        return "Cartera de acreditación"
+    if origen.startswith("Cartera de Exámenes del CRS"):
+        return "Cartera de Exámenes del CRS"
+    if origen == "Normas Generales de Toma de Muestras":
+        return origen
+    if origen == "Manual de toma de muestras":
+        return origen
+    return ""
 ENCABEZADOS_NORMAS = {
     "Preparación del paciente": "Preparación del paciente",
     "Procedimiento de toma de muestras": "Procedimiento de toma de muestras",
@@ -85,6 +119,36 @@ def texto_valido(valor, estado=None):
         if e not in ("especifico", "heredado"):
             return False
     return not bool(re.match(r"^(pendiente\b|por definir\b|falta incorporar\b|sin documentar\b)", normalizar(t)))
+
+
+# Aviso genérico de Acreditación: no constituye preparación específica.
+# Se ignora únicamente en «Preparación del paciente» cuando proviene de
+# Acreditación; no se filtran por esta regla las Indicaciones del CRS ni Normas.
+AVISO_PREPARACION_GENERAL_ACREDITACION = (
+    "Aplicar requisitos generales de preparación del paciente del CRS; "
+    "verificar además si la prestación tiene una indicación específica."
+)
+
+
+def preparacion_valida(valor, estado=None, *, fuente_acreditacion=False):
+    """Valida preparación, descartando avisos genéricos de Acreditación.
+
+    Las comparaciones están normalizadas (tildes, mayúsculas, puntuación y
+    espacios); se exige coincidencia completa para no eliminar indicaciones
+    clínicas adicionales que pudieran acompañar al aviso.
+    """
+    if not texto_valido(valor, estado):
+        return False
+    limpio = normalizar(valor)
+    if limpio in ("no aplica", "no aplicable", "n a", "na"):
+        return False
+    if (limpio.startswith("pendiente incorporar")
+            or "pendiente incorporar la instruccion especifica" in limpio
+            or "consultar los manuales instructivos del laboratorio externo" in limpio):
+        return False
+    if fuente_acreditacion and limpio == normalizar(AVISO_PREPARACION_GENERAL_ACREDITACION):
+        return False
+    return True
 
 
 def _fecha():
@@ -218,10 +282,10 @@ def extraer_manual_toma(documento, nombre_archivo):
             "Procesamiento de muestras": procesamiento}
 
 
-def guardar_manual_toma(db_path, archivo, nombre_archivo):
+def guardar_manual_toma(db_path, archivo, nombre_archivo, conexion=None):
     """Actualiza en una sola transacción el original y sus dos valores limpios."""
     campos = extraer_manual_toma(archivo, nombre_archivo)
-    with sqlite3.connect(db_path) as con:
+    with (nullcontext(conexion) if conexion is not None else sqlite3.connect(db_path)) as con:
         con.execute("DELETE FROM manual_toma_campos")
         con.executemany("INSERT INTO manual_toma_campos(campo,contenido) VALUES (?,?)", list(campos.items()))
         con.execute("""INSERT OR REPLACE INTO documentos_fuente
@@ -274,13 +338,123 @@ def extraer_normas(documento, nombre_archivo):
             continue
         final = matches[i + 1].start() if i + 1 < len(matches) else len(texto)
         contenido = texto[m.end():final].strip()
-        contenido = re.sub(r"\n{3,}", "\n\n", contenido)
+        contenido = limpiar_formato_normas(nombre, contenido)
         if contenido:
             secciones[nombre] = contenido
     faltan = [c for c in CAMPOS_NORMAS if c not in secciones]
     if faltan:
         raise ValueError("No se reconocen los cuatro apartados esperados: " + ", ".join(faltan))
     return secciones
+
+
+# Subtítulos documentales comprobados en las Normas generales del CRS.
+# Solo se reconoce como título una línea completa, para no poner en negrita
+# fragmentos del texto clínico ni inventar una estructura.
+SUBTITULOS_NORMAS = {
+    "Preparación del paciente": (
+        "Indicaciones generales para pacientes ambulatorios",
+        "Regla institucional", "Antes de la toma", "Documentación requerida",
+    ),
+    "Procedimiento de toma de muestras": (
+        "Sangre venosa por sistema al vacío", "Preparación", "Material",
+        "Obtención", "Después de la toma",
+    ),
+    "Rotulación": (
+        "Rotulación institucional general", "Datos mínimos",
+        "Datos operativos del sistema institucional", "Ubicación de la etiqueta",
+    ),
+    "Criterios de rechazo": (
+        "Criterios generales institucionales", "Identificación y solicitud",
+        "Muestra y contenedor", "Transporte y conservación",
+        "Condiciones fisicoquímicas",
+    ),
+}
+
+
+def es_subtitulo_normas(campo, linea):
+    return normalizar(linea) in {
+        normalizar(t) for t in SUBTITULOS_NORMAS.get(campo, ())
+    }
+
+
+def limpiar_formato_normas(campo, contenido):
+    """Reconstruye párrafos, viñetas y subtítulos de Normas PDF o DOCX.
+
+    Un salto visual de línea en el PDF no equivale a un nuevo párrafo: las
+    continuaciones se unen hasta la siguiente viñeta o subtítulo reconocido.
+    No se reescriben ni se modifican las indicaciones clínicas.
+    """
+    texto = str(contenido or "").replace("\r\n", "\n").replace("\r", "\n")
+    for caracter in ("\u200b", "\ufeff", "\u00ad", "\u2060"):
+        texto = texto.replace(caracter, "")
+    texto = texto.replace("\u00a0", " ")
+    texto = re.sub(r"[\t ]+", " ", texto)
+
+    # El primer PDF institucional incluía una narración que repite todas las
+    # instrucciones de las 11 viñetas. Se elimina SOLO cuando se comprueba que
+    # están presentes las viñetas equivalentes, no por palabras aisladas.
+    if campo == "Procedimiento de toma de muestras":
+        repeticion = re.search(
+            r"(?s)(?<=Sangre venosa por sistema al vacío\n)(.*?)\n\s*Preparación\s*\n",
+            texto,
+        )
+        if repeticion:
+            parrafo = normalizar(repeticion.group(1))
+            resto = normalizar(texto[repeticion.end():])
+            evidencias = (
+                "higiene de manos entre pacientes",
+                "verificar que etiquetas y orden correspondan",
+                "seleccionar una vena y un sitio indemne",
+                "mezclar por inversion suave",
+                "eliminar material cortopunzante sin recapsular",
+                "comprimir colocar parche y registrar al responsable",
+            )
+            if all(frase in parrafo and frase in resto for frase in evidencias):
+                texto = texto[:repeticion.start()] + "Preparación\n" + texto[repeticion.end():]
+
+    titulos = {normalizar(t) for t in SUBTITULOS_NORMAS.get(campo, ())}
+    piezas = []  # (clase, texto)
+    for linea in texto.split("\n"):
+        linea = linea.strip()
+        if not linea:
+            continue
+        # El PDF anterior tenía este subtítulo sin contenido; nunca fue una
+        # instrucción. Se descarta únicamente en esa posición y ese apartado.
+        if (campo == "Rotulación"
+                and normalizar(linea) == "procedencia y trazabilidad avanzada"
+                and not any(x.strip() for x in texto.split(linea, 1)[-1].splitlines())):
+            continue
+        # Folios o cabeceras claramente identificables, no números clínicos.
+        if (re.fullmatch(r"(?:p[aá]gina\s*:?\s*)?\d+\s*(?:de|/)\s*\d+", linea, re.I)
+                or re.fullmatch(r"p[aá]gina\s*:?\s*\d+", linea, re.I)):
+            continue
+        if normalizar(linea) in titulos:
+            piezas.append(["titulo", linea])
+            continue
+        vi = re.match(r"^(?:[●•▪◦∙]\s*|[-–]\s+)(.*)$", linea)
+        if vi:
+            piezas.append(["vineta", re.sub(r"\s+", " ", vi.group(1)).strip()])
+            continue
+        # Continuación de una viñeta o párrafo cortado por el ancho del PDF.
+        if piezas and piezas[-1][0] in ("vineta", "parrafo"):
+            piezas[-1][1] += " " + linea
+        else:
+            piezas.append(["parrafo", linea])
+
+    lineas = []
+    for clase, frase in piezas:
+        frase = re.sub(r"\s+", " ", frase).strip()
+        if not frase:
+            continue
+        if clase == "titulo":
+            if lineas and lineas[-1] != "":
+                lineas.append("")
+            lineas.append(frase)
+        elif clase == "vineta":
+            lineas.append("  • " + frase)
+        else:
+            lineas.append(frase)
+    return "\n".join(lineas).strip()
 
 
 def _leer_cartera(documento):
@@ -333,11 +507,11 @@ def _leer_cartera(documento):
         wb.close()
 
 
-def guardar_normas(db_path, archivo, nombre_archivo):
+def guardar_normas(db_path, archivo, nombre_archivo, conexion=None):
     campos = extraer_normas(archivo, nombre_archivo)  # validar antes de modificar SQLite
     tipo = ("application/pdf" if nombre_archivo.lower().endswith(".pdf")
             else "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-    with sqlite3.connect(db_path) as con:
+    with (nullcontext(conexion) if conexion is not None else sqlite3.connect(db_path)) as con:
         con.execute("DELETE FROM normas_generales_campos")
         con.executemany("INSERT INTO normas_generales_campos(campo,contenido) VALUES (?,?)", list(campos.items()))
         con.execute("""INSERT OR REPLACE INTO documentos_fuente
@@ -347,13 +521,13 @@ def guardar_normas(db_path, archivo, nombre_archivo):
     return len(campos)
 
 
-def guardar_cartera_acreditacion(db_path, archivo, nombre_archivo):
+def guardar_cartera_acreditacion(db_path, archivo, nombre_archivo, conexion=None):
     import json
     registros = _leer_cartera(archivo)  # validar antes de modificar SQLite
     filas = [(numero,ident,codigo,prestacion,prest_norm,area,area_norm,
               json.dumps(datos,ensure_ascii=False),json.dumps(estados,ensure_ascii=False))
              for numero,ident,codigo,prestacion,prest_norm,area,area_norm,datos,estados in registros]
-    with sqlite3.connect(db_path) as con:
+    with (nullcontext(conexion) if conexion is not None else sqlite3.connect(db_path)) as con:
         con.execute("DELETE FROM prestaciones_acreditacion")
         con.executemany("""INSERT INTO prestaciones_acreditacion
             (fila_excel,identificador,codigo,prestacion,prestacion_norm,area,area_norm,datos_json,estados_json)
@@ -418,19 +592,87 @@ def _buscar_match(con, nombre_examen, area, seleccion_manual=None):
     return None, "sin coincidencia exacta"
 
 
-def obtener_valores_fuentes(db_path, nombre_examen, area=None, seleccion_manual=None):
+def coincidencia_exacta_acreditacion(db_path, nombre_examen, area):
+    """Retorna (ID, tipo de coincidencia), o (None, None) si es ambigua.
+
+    Reutiliza EXACTAMENTE las reglas de selección institucional de _buscar_match;
+    nunca promociona un candidato de similitud a coincidencia exacta.
+    """
+    with closing(sqlite3.connect(db_path)) as con:
+        fila, motivo = _buscar_match(con, nombre_examen, area)
+    return (fila[0], motivo) if fila else (None, None)
+
+
+def sincronizar_vinculo_acreditacion_en_sesion(
+    estado, db_path, examen, area, opciones, revision=0
+):
+    """Sincroniza el selectbox y el vínculo real antes de crear el widget.
+
+    Respeta la selección o eliminación deliberada del usuario. Si cambia el
+    examen o el área, vuelve a evaluar el vínculo exacto. Si solo cambia la
+    revisión de la Cartera, mantiene una elección manual que todavía exista.
+    ``estado`` admite st.session_state y diccionarios de pruebas.
+    No escribe en SQLite.
+    """
+    disponibles = set(opciones)
+    contexto = (str(examen or ""), str(area or ""), int(revision or 0))
+    anterior = estado.get("contexto_emparejamiento_acreditacion")
+    actual = estado.get("acreditacion_manual_selector")
+    manual = bool(estado.get("acreditacion_seleccion_confirmada_manualmente", False))
+    exacta, detalle = coincidencia_exacta_acreditacion(db_path, examen, area)
+    if exacta not in disponibles:
+        exacta, detalle = None, None
+
+    if anterior != contexto:
+        mismo_examen_area = (isinstance(anterior, tuple) and anterior[:2] == contexto[:2])
+        conserva_manual = (
+            manual and mismo_examen_area
+            and (actual is None or actual in disponibles)
+        )
+        # Un vínculo no vacío en sesiones de versiones anteriores fue elegido
+        # por el usuario: no reemplazarlo por un nombre exacto recién detectado.
+        vinculo_heredado = (
+            anterior is None and not manual and actual is not None
+            and actual in disponibles
+        )
+        if conserva_manual or vinculo_heredado:
+            estado["acreditacion_seleccion_confirmada_manualmente"] = True
+        else:
+            estado["acreditacion_manual_selector"] = exacta
+            estado["acreditacion_seleccion_confirmada_manualmente"] = False
+        estado["contexto_emparejamiento_acreditacion"] = contexto
+    elif actual not in disponibles and actual is not None:
+        estado["acreditacion_manual_selector"] = exacta
+        estado["acreditacion_seleccion_confirmada_manualmente"] = False
+    elif not manual and actual != exacta:
+        # Recuperar widgets antiguos que quedaron vacíos, sin tocar el valor
+        # de una selección manual explícita.
+        estado["acreditacion_manual_selector"] = exacta
+
+    elegido = estado.get("acreditacion_manual_selector")
+    estado["acreditacion_manual_id"] = elegido
+    estado["acreditacion_coincidencia_automatica"] = (
+        detalle if elegido is not None
+        and elegido == exacta
+        and not estado.get("acreditacion_seleccion_confirmada_manualmente", False)
+        else None
+    )
+    return elegido
+
+
+def obtener_valores_fuentes(db_path, nombre_examen, area=None, seleccion_manual=None, indicaciones_cartera=""):
     """Regresa (valores, orígenes, prestación vinculada, mensaje).
 
-    Ningún PDF analizado interviene en los ocho campos controlados.
-    Los seis campos de Acreditación priorizan Cartera > Normas.
-    Los dos campos adicionales se obtienen exclusivamente del Manual.
+    Preparación: Indicaciones CRS > Acreditación válida > Normas.
+    Para otros campos: Acreditación válida > Normas (si está disponible).
+    Recepción/Procesamiento: exclusivamente Manual; nunca PDF.
     """
     import json
     valores, origen = {}, {}
     with sqlite3.connect(db_path) as con:
         for campo, contenido in con.execute("SELECT campo, contenido FROM normas_generales_campos"):
-            if campo in CAMPOS_NORMAS and texto_valido(contenido):
-                valores[campo] = contenido
+            if campo in CAMPOS_NORMAS and (preparacion_valida(contenido) if campo == "Preparación del paciente" else texto_valido(contenido)):
+                valores[campo] = limpiar_formato_normas(campo, contenido)
                 origen[campo] = "Normas Generales de Toma de Muestras"
         for campo, contenido in con.execute("SELECT campo, contenido FROM manual_toma_campos"):
             if campo in CAMPOS_MANUAL and texto_valido(contenido):
@@ -444,7 +686,17 @@ def obtener_valores_fuentes(db_path, nombre_examen, area=None, seleccion_manual=
             datos, estados = json.loads(datos_raw), json.loads(estados_raw)
             for campo in CAMPOS_CONTROLADOS:
                 texto = datos.get(campo,"")
-                if texto_valido(texto, estados.get(campo)):
+                valido = (preparacion_valida(texto, estados.get(campo), fuente_acreditacion=True)
+                          if campo == "Preparación del paciente"
+                          else texto_valido(texto, estados.get(campo)))
+                if valido:
                     valores[campo] = texto
                     origen[campo] = "Cartera de Acreditación · " + str(estados.get(campo))
+        # «Indicaciones» solo se recibe del examen CRS efectivamente emparejado.
+        # Solo para la segunda fuente (Acreditación) «No aplica» activa el
+        # respaldo de Normas. En el CRS la regla solicitada es: primer texto
+        # no vacío y documentado prevalece, aunque diga «No aplica».
+        if texto_valido(indicaciones_cartera):
+            valores["Preparación del paciente"] = indicaciones_cartera
+            origen["Preparación del paciente"] = "Cartera de Exámenes del CRS · Indicaciones"
     return valores, origen, seleccion, mensaje
