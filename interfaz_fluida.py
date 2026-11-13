@@ -37,6 +37,11 @@ SOPORTE_NAVEGACION = r"""<!doctype html><html><body style='margin:0'>
   const marcadorReferencias = () => doc.querySelector(
     '[class*="st-key-contenedor_referencias"] details > summary'
   );
+  const marcadorAnalisis = () => doc.querySelector(
+    '[class*="st-key-analyze_pdf"] button'
+  );
+  const mensajeAnalisis = () => Array.from(doc.querySelectorAll('[data-testid="stAlert"]'))
+    .find(nodo => /Se analizaron \d+ PDF|Se procesó correctamente el archivo|No se pudo analizar el documento|Selecciona un examen antes de continuar|Selecciona un laboratorio de procesamiento antes de analizar/.test(nodo.textContent || ''));
   const cerrarEspera = () => {
     if (UI.observador) UI.observador.disconnect();
     if (UI.reloj) host.clearTimeout(UI.reloj);
@@ -59,6 +64,27 @@ SOPORTE_NAVEGACION = r"""<!doctype html><html><body style='margin:0'>
       } else if (Math.abs(scroll.scrollTop - dato.posicion) > 2) {
         scroll.scrollTop = dato.posicion;
       }
+    } else if (dato.tipo === 'analizar') {
+      // Al terminar la extracción, Streamlit añade la revisión bajo el botón.
+      // Recuperar la posición relativa al botón evita saltos hacia el grid,
+      // incluso si se insertaron advertencias encima durante el análisis.
+      const mensaje = mensajeAnalisis();
+      if (!respaldo && (!mensaje || mensaje === dato.alertaAnterior)) return;
+      if (dato.recuperando) return;
+      dato.recuperando = true;
+      // Dejar que se monte el resultado antes de corregir la posición.
+      host.requestAnimationFrame(() => host.requestAnimationFrame(() => {
+        if (UI.pendiente !== dato) return;
+        const boton = marcadorAnalisis();
+        if (boton && dato.referenciaY != null) {
+          const desplazamiento = boton.getBoundingClientRect().top - dato.referenciaY;
+          if (Math.abs(desplazamiento) > 2) scroll.scrollTop += desplazamiento;
+        } else if (Math.abs(scroll.scrollTop - dato.posicion) > 2) {
+          scroll.scrollTop = dato.posicion;
+        }
+        cerrarEspera();
+      }));
+      return;
     } else {
       // El flujo de actualización abre/cierra un diálogo al terminar el rerun.
       // Esperar al cambio del diálogo, con un único respaldo temporal.
@@ -73,11 +99,13 @@ SOPORTE_NAVEGACION = r"""<!doctype html><html><body style='margin:0'>
   const registrar = tipo => {
     cerrarEspera();
     const scroll = encontrarScroll();
-    const marcador = tipo === 'referencias' ? marcadorReferencias() : null;
+    const marcador = tipo === 'referencias' ? marcadorReferencias() :
+      tipo === 'analizar' ? marcadorAnalisis() : null;
     UI.pendiente = {
       tipo, posicion: scroll.scrollTop || 0,
       anterior: marcador,
       referenciaY: marcador ? marcador.getBoundingClientRect().top : null,
+      alertaAnterior: tipo === 'analizar' ? mensajeAnalisis() : null,
       dialogoAnterior: !!doc.querySelector('[role="dialog"]')
     };
     UI.observador = new MutationObserver(() => {
@@ -89,7 +117,8 @@ SOPORTE_NAVEGACION = r"""<!doctype html><html><body style='margin:0'>
       });
     });
     UI.observador.observe(doc.body, {childList: true, subtree: true});
-    UI.reloj = host.setTimeout(() => restaurar(true), 2500);
+    // El OCR puede tardar más que las transiciones de referencias.
+    UI.reloj = host.setTimeout(() => restaurar(true), tipo === 'analizar' ? 30000 : 2500);
   };
 
 
@@ -126,6 +155,11 @@ SOPORTE_NAVEGACION = r"""<!doctype html><html><body style='margin:0'>
     if (!boton) return;
     if (boton.closest('[class*="st-key-abrir_area_"]')) {
       ocultarBienvenidaDuranteCambio();
+      return;
+    }
+    const analizar = boton.closest('[class*="st-key-analyze_pdf"]');
+    if (analizar && !boton.disabled) {
+      registrar('analizar');
       return;
     }
     const aplicar = boton.closest('[class*="st-key-btn_aplicar_referencias_apa"]');

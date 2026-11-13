@@ -265,10 +265,16 @@ def registrar_acceso(ruta, usuario, evento, descripcion=None):
 
 
 
-def historial_actividad(ruta, limite=30):
+def historial_actividad(ruta, limite=30, desplazamiento=0):
     with conexion_cerrada(ruta) as con:
-        return con.execute("SELECT fecha,usuario,evento,descripcion FROM eventos_acceso ORDER BY id DESC LIMIT ?",
-                           (max(1,min(int(limite),200)),)).fetchall()
+        return con.execute("""SELECT fecha,usuario,evento,descripcion FROM eventos_acceso
+            ORDER BY id DESC LIMIT ? OFFSET ?""",
+            (max(1,min(int(limite),200)), max(0,int(desplazamiento)))).fetchall()
+
+
+def total_historial_actividad(ruta):
+    with conexion_cerrada(ruta) as con:
+        return con.execute("SELECT COUNT(*) FROM eventos_acceso").fetchone()[0]
 
 
 def usuario_habilitado(ruta, usuario, revision_sesion=None):
@@ -336,7 +342,7 @@ def _clave_protegida(clave):
 
 
 def administrar_cuenta(ruta, actor, revision_esperada, operacion, objetivo, *,
-                       nombre_visible=None, rol=None, clave=None, activo=None):
+                       nombre_visible=None, rol=None, clave=None, activo=None, nuevo_usuario=None):
     """Crea/edita/restablece/desactiva cuentas con auditoría y control de versión.
 
     No devuelve ni registra contraseñas, sales ni hashes.
@@ -349,6 +355,8 @@ def administrar_cuenta(ruta, actor, revision_esperada, operacion, objetivo, *,
         nombre_visible = _validar_nombre_visible(nombre_visible)
         if rol not in ('administrador','encargado'):
             raise ValueError('Selecciona un rol válido.')
+    if operacion == 'editar':
+        nuevo_usuario = _validar_nombre_usuario(nuevo_usuario if nuevo_usuario is not None else nombre_usuario)
     if operacion in ('crear','clave'):
         sal, derivada = _clave_protegida(clave)
     if operacion == 'estado' and not isinstance(activo, bool):
@@ -385,10 +393,18 @@ def administrar_cuenta(ruta, actor, revision_esperada, operacion, objetivo, *,
             if operacion == 'estado' and original.casefold() == actor.casefold() and not activo:
                 raise ValueError('No puedes desactivar tu propia cuenta mientras administras usuarios.')
             if operacion == 'editar':
+                cambio_usuario = nuevo_usuario != original
+                if cambio_usuario:
+                    duplicado = con.execute("""SELECT 1 FROM usuarios_aplicacion
+                        WHERE usuario=? COLLATE NOCASE AND usuario<>? COLLATE NOCASE""",
+                        (nuevo_usuario, original)).fetchone()
+                    if duplicado:
+                        raise ValueError('Ya existe otra cuenta con ese nombre de usuario.')
                 con.execute("""UPDATE usuarios_aplicacion
-                    SET nombre_visible=?,rol=?,sesion_revision=sesion_revision+?
+                    SET usuario=?,nombre_visible=?,rol=?,sesion_revision=sesion_revision+?
                     WHERE usuario=?""",
-                    (nombre_visible, rol, int(rol != rol_actual), original))
+                    (nuevo_usuario, nombre_visible, rol,
+                     int(cambio_usuario or rol != rol_actual), original))
             elif operacion == 'clave':
                 con.execute("""UPDATE usuarios_aplicacion
                     SET sal=?,clave_derivada=?,iteraciones=?,sesion_revision=sesion_revision+1
@@ -397,17 +413,28 @@ def administrar_cuenta(ruta, actor, revision_esperada, operacion, objetivo, *,
                 con.execute("""UPDATE usuarios_aplicacion
                     SET activo=?,sesion_revision=sesion_revision+1 WHERE usuario=?""",
                     (int(activo), original))
+        if operacion == 'editar' and nuevo_usuario != nombre_usuario:
+            return f'Editar usuario: {nombre_usuario} → {nuevo_usuario}'
         return f'{acciones[operacion]}: {nombre_usuario}'
 
-    # Se conserva solamente el tipo de operación/objetivo: jamás la clave.
+    # Solo nombres de acceso en auditoría, jamás contraseñas.
+    detalle = f'Cuenta: {nombre_usuario}'
+    if operacion == 'editar' and nuevo_usuario != nombre_usuario:
+        detalle += f' → {nuevo_usuario}'
     return ejecutar_cambio(ruta, 'usuarios:administracion', actor, revision_esperada,
-        acciones[operacion], escritor, detalle=f'Cuenta: {nombre_usuario}')
+        acciones[operacion], escritor, detalle=detalle)
 
 
-def historial(ruta, limite=50):
+def historial(ruta, limite=50, desplazamiento=0):
     with conexion_cerrada(ruta) as con:
         return con.execute("""SELECT fecha,usuario,recurso,accion,revision_nueva,archivo
-            FROM auditoria_cambios ORDER BY id DESC LIMIT ?""", (max(1,min(int(limite),200)),)).fetchall()
+            FROM auditoria_cambios ORDER BY id DESC LIMIT ? OFFSET ?""",
+            (max(1,min(int(limite),200)), max(0,int(desplazamiento)))).fetchall()
+
+
+def total_historial(ruta):
+    with conexion_cerrada(ruta) as con:
+        return con.execute("SELECT COUNT(*) FROM auditoria_cambios").fetchone()[0]
 
 
 def cantidad_usuarios(ruta):
@@ -444,11 +471,12 @@ def crear_usuario(ruta, usuario, nombre_visible, password):
 
 
 def autenticar(ruta, usuario, password):
+    """Verifica usuario con mayúsculas/minúsculas exactas y contraseña segura."""
     if not usuario or not password:
         return None
     with conexion_cerrada(ruta) as con:
         fila = con.execute("""SELECT usuario,nombre_visible,sal,clave_derivada,iteraciones,rol,sesion_revision
-            FROM usuarios_aplicacion WHERE usuario=? COLLATE NOCASE AND activo=1""", (usuario.strip(),)).fetchone()
+            FROM usuarios_aplicacion WHERE usuario=? COLLATE BINARY AND activo=1""", (usuario.strip(),)).fetchone()
     if not fila:
         # Ejecución con coste similar para evitar distinguir usuarios por tiempo.
         hashlib.pbkdf2_hmac("sha256", password.encode(), b"s" * 32, ITERACIONES)

@@ -2,7 +2,8 @@
 
 - Normas Generales de Toma de Muestras: cuatro valores por defecto.
 - Cartera de Acreditación: seis valores por prestación (clave «Prestación»).
-- Manual de toma de muestras: dos fragmentos institucionales delimitados.
+- Recepción y Procesamiento de muestras: campos presentes en la ficha,
+  deliberadamente sin fuente de extracción automática.
 
 Los PDF analizados por el usuario no completan estos ocho campos.
 Los reemplazos de archivos y sus índices se realizan en una sola transacción.
@@ -26,7 +27,7 @@ from openpyxl import load_workbook
 
 NORMAS_ID = "normas_generales"
 ACREDITACION_ID = "cartera_acreditacion"
-MANUAL_ID = "manual_toma_muestras"
+MANUAL_ID = "manual_toma_muestras"  # Identificador legado: solo para retirar datos antiguos.
 CAMPOS_MANUAL = ("Recepción de muestras", "Procesamiento de muestras")
 CAMPOS_NORMAS = (
     "Preparación del paciente",
@@ -54,14 +55,20 @@ PRIORIDAD_FUENTES_POR_CAMPO = {
     ),
     "Muestra requerida y recipiente": ("Cartera de acreditación",),
     "Procedimiento de toma de muestras": (
-        "Cartera de acreditación", "Normas Generales de Toma de Muestras",
+        "Normas Generales de Toma de Muestras", "Cartera de acreditación",
     ),
-    "Rotulación": ("Cartera de acreditación", "Normas Generales de Toma de Muestras"),
+    "Rotulación": ("Normas Generales de Toma de Muestras", "Cartera de acreditación"),
     "Condiciones de envío al Laboratorio": ("Cartera de acreditación",),
-    "Criterios de rechazo": ("Cartera de acreditación", "Normas Generales de Toma de Muestras"),
-    "Recepción de muestras": ("Manual de toma de muestras",),
-    "Procesamiento de muestras": ("Manual de toma de muestras",),
+    "Criterios de rechazo": ("Normas Generales de Toma de Muestras", "Cartera de acreditación"),
+    "Recepción de muestras": (),
+    "Procesamiento de muestras": (),
 }
+
+
+# Solo estos tres campos conservan Normas cuando ambas fuentes son válidas.
+CAMPOS_NORMAS_PRIORITARIAS = frozenset((
+    "Procedimiento de toma de muestras", "Rotulación", "Criterios de rechazo",
+))
 
 
 def identificar_fuente_procedencia(texto_origen):
@@ -72,8 +79,6 @@ def identificar_fuente_procedencia(texto_origen):
     if origen.startswith("Cartera de Exámenes del CRS"):
         return "Cartera de Exámenes del CRS"
     if origen == "Normas Generales de Toma de Muestras":
-        return origen
-    if origen == "Manual de toma de muestras":
         return origen
     return ""
 ENCABEZADOS_NORMAS = {
@@ -133,14 +138,15 @@ AVISO_PREPARACION_GENERAL_ACREDITACION = (
 def preparacion_valida(valor, estado=None, *, fuente_acreditacion=False):
     """Valida preparación, descartando avisos genéricos de Acreditación.
 
-    Las comparaciones están normalizadas (tildes, mayúsculas, puntuación y
-    espacios); se exige coincidencia completa para no eliminar indicaciones
-    clínicas adicionales que pudieran acompañar al aviso.
+    «No aplica» y sus variantes son válidos SOLO si el texto viene de la
+    Cartera de Acreditación y su estado documental está validado. En Normas
+    continúan descartándose; Indicaciones CRS usa su propia validación.
+    Las comparaciones están normalizadas para respetar el resto de filtros.
     """
     if not texto_valido(valor, estado):
         return False
     limpio = normalizar(valor)
-    if limpio in ("no aplica", "no aplicable", "n a", "na"):
+    if limpio in ("no aplica", "no aplicable", "n a", "na") and not fuente_acreditacion:
         return False
     if (limpio.startswith("pendiente incorporar")
             or "pendiente incorporar la instruccion especifica" in limpio
@@ -183,117 +189,30 @@ def inicializar_fuentes(db_path):
             estados_json TEXT NOT NULL
         )""")
         con.execute("CREATE INDEX IF NOT EXISTS idx_prestacion_norm ON prestaciones_acreditacion(prestacion_norm)")
-        con.execute("""CREATE TABLE IF NOT EXISTS manual_toma_campos (
-            campo TEXT PRIMARY KEY,
-            contenido TEXT NOT NULL
-        )""")
+        # Migración de retiro: eliminar SOLO el Manual heredado.
+        # No tocar Normas, carteras, plantillas, cuentas ni auditorías.
+        if con.execute("SELECT 1 FROM documentos_fuente WHERE fuente_id=?", (MANUAL_ID,)).fetchone():
+            con.execute("DELETE FROM documentos_fuente WHERE fuente_id=?", (MANUAL_ID,))
+        if con.execute("""SELECT 1 FROM sqlite_master
+                          WHERE type='table' AND name='manual_toma_campos'""").fetchone():
+            con.execute("DROP TABLE manual_toma_campos")
+
+
+def hay_manual_heredado(db_path):
+    """Permite respaldar la base SOLO si contiene el Manual que se va a retirar."""
+    with closing(sqlite3.connect(db_path)) as con:
+        tabla = con.execute("""SELECT 1 FROM sqlite_master
+                              WHERE type='table' AND name='manual_toma_campos'""").fetchone()
+        docs = con.execute("""SELECT 1 FROM sqlite_master
+                             WHERE type='table' AND name='documentos_fuente'""").fetchone()
+        archivo = (docs and con.execute(
+            "SELECT 1 FROM documentos_fuente WHERE fuente_id=?", (MANUAL_ID,)).fetchone())
+        return bool(tabla or archivo)
 
 
 def _pdf_como_texto(documento):
     with fitz.open(stream=documento, filetype="pdf") as pdf:
         return "\n".join(p.get_text(sort=True) for p in pdf)
-
-
-
-def _texto_manual_sin_margenes(documento):
-    """Recupera solo bloques del cuerpo (sin cabeceras, pies o folios).
-
-    Se utiliza la posición física del texto y después frases delimitadoras,
-    evitando copiar páginas completas o números incrustados en el documento.
-    """
-    if not documento:
-        raise ValueError("El PDF del manual está vacío.")
-    paginas = []
-    try:
-        with fitz.open(stream=documento, filetype="pdf") as pdf:
-            if not pdf.page_count:
-                raise ValueError("El PDF del manual no contiene páginas.")
-            for pagina in pdf:
-                alto = pagina.rect.height
-                # En el manual original el texto útil ocupa aproximadamente
-                # y=131..728 pt; los membretes terminan cerca de y=115 y el
-                # folio empieza en y=735. Las proporciones toleran reescalados.
-                minimo, maximo = alto * (120 / 792), alto * (730 / 792)
-                partes = []
-                for bloque in pagina.get_text("blocks", sort=True):
-                    x0, y0, x1, y1, contenido = bloque[:5]
-                    if not isinstance(contenido, str):
-                        continue
-                    if y0 < minimo or y1 > maximo:
-                        continue
-                    contenido = contenido.strip()
-                    if contenido:
-                        partes.append(contenido)
-                if partes:
-                    paginas.append(" ".join(partes))
-    except (ValueError, RuntimeError) as ex:
-        raise ValueError(f"No se pudo leer el PDF del manual: {ex}") from ex
-    texto = re.sub(r"\s+", " ", " ".join(paginas)).strip()
-    if len(texto) < 200:
-        raise ValueError("El PDF no tiene texto digital suficiente; no se sobrescribirá el manual almacenado.")
-    return texto
-
-
-def extraer_manual_toma(documento, nombre_archivo):
-    """Obtiene exactamente los dos pasajes solicitados, sin títulos o márgenes.
-
-    Si cambia la estructura del manual y los límites dejan de existir, rechaza
-    la actualización antes de escribir en SQLite (sin extracciones parciales).
-    """
-    if not str(nombre_archivo).lower().endswith(".pdf"):
-        raise ValueError("El Manual de toma de muestras debe ser un archivo PDF.")
-    texto = _texto_manual_sin_margenes(documento)
-
-    def ubicar(patron, desde=0, identificador="fragmento"):
-        match = re.search(patron, texto[desde:], flags=re.IGNORECASE)
-        if not match:
-            raise ValueError(f"No se reconoció {identificador} en el manual. Se conservó la versión anterior.")
-        return desde + match.start(), desde + match.end()
-
-    _, fin_titulo_recepcion = ubicar(
-        r"\bX\s*[.]\s*RECEPCI[OÓ]N\s+Y\s+ROTULACI[OÓ]N\s+DE\s+MUESTRAS\b",
-        identificador="el título X. RECEPCIÓN Y ROTULACIÓN DE MUESTRAS")
-    inicio_recepcion, _ = ubicar(
-        r"Las\s+muestras\s+deben\s+ser\s+recepcionadas\s+por\s+un\s+t[eé]cnico\s+param[eé]dico\s+o\s+profesional\s+de\s+la\s+salud[.]",
-        desde=fin_titulo_recepcion, identificador="el inicio de Recepción de muestras")
-    _, fin_recepcion = ubicar(
-        r"cumplen\s+con\s+lo\s+estipulado\s+por\s+el\s+Laboratorio\s+del\s+CRSCO[.]",
-        desde=inicio_recepcion, identificador="el final de Recepción de muestras")
-    _, fin_titulo_procesamiento = ubicar(
-        r"\b2\s*[.]\s*MUESTRAS\s+PROCEDENTES\s+DE\s+LA\s+TOMA\s+DE\s+MUESTRAS\s+DEL\s+LABORATORIO\s+DEL\s+CRSCO\b",
-        desde=fin_recepcion, identificador="el título 2. MUESTRAS PROCEDENTES...")
-    inicio_procesamiento, _ = ubicar(
-        r"Las\s+muestras\s+son\s+rotuladas\s+en\s+la\s+Toma\s+de\s+Muestras\s+con\s+una\s+etiqueta",
-        desde=fin_titulo_procesamiento, identificador="el inicio de Procesamiento de muestras")
-    _, fin_procesamiento = ubicar(
-        r"se\s+ingresan\s+en\s+forma\s+digital\s+en\s+el\s+proceso\s+de\s+agendamiento\s+del\s+paciente\s+en\s+la\s+secretar[ií]a\s+de\s+laboratorio[.]",
-        desde=inicio_procesamiento, identificador="el final de Procesamiento de muestras")
-
-    recepcion = texto[inicio_recepcion:fin_recepcion].strip()
-    procesamiento = texto[inicio_procesamiento:fin_procesamiento].strip()
-    # Validación de integridad y seguridad: jamás aceptar cabeceras o folios.
-    for nombre, contenido in (("Recepción de muestras", recepcion),
-                              ("Procesamiento de muestras", procesamiento)):
-        if len(contenido) < 300:
-            raise ValueError(f"El apartado {nombre} parece incompleto; se conservará la versión anterior.")
-        if re.search(r"(?:Cod[.]\s*Caract[.]|C[oó]digo\s*:|P[aá]gina\s*:|Vigencia\s*:)", contenido, re.I):
-            raise ValueError(f"Se detectó texto de encabezado o pie en {nombre}; se conservará la versión anterior.")
-    return {"Recepción de muestras": recepcion,
-            "Procesamiento de muestras": procesamiento}
-
-
-def guardar_manual_toma(db_path, archivo, nombre_archivo, conexion=None):
-    """Actualiza en una sola transacción el original y sus dos valores limpios."""
-    campos = extraer_manual_toma(archivo, nombre_archivo)
-    with (nullcontext(conexion) if conexion is not None else sqlite3.connect(db_path)) as con:
-        con.execute("DELETE FROM manual_toma_campos")
-        con.executemany("INSERT INTO manual_toma_campos(campo,contenido) VALUES (?,?)", list(campos.items()))
-        con.execute("""INSERT OR REPLACE INTO documentos_fuente
-            (fuente_id,nombre_archivo,tipo_mime,archivo,sha256,fecha_actualizacion,registros)
-            VALUES (?,?,?,?,?,?,?)""",
-            (MANUAL_ID, nombre_archivo, "application/pdf", sqlite3.Binary(archivo),
-             hashlib.sha256(archivo).hexdigest(), _fecha(), len(campos)))
-    return len(campos)
 
 
 def _docx_como_texto(documento):
@@ -554,20 +473,122 @@ def listar_prestaciones_acreditacion(db_path):
         return con.execute("SELECT id, prestacion, area FROM prestaciones_acreditacion ORDER BY prestacion COLLATE NOCASE, area").fetchall()
 
 
-def candidatos_acreditacion(db_path, nombre_examen, area, limite=8):
+# Términos descriptivos o administrativos que no identifican por sí solos
+# una prestación. No se expande «AC.» a un término clínico supuesto.
+_TERMINOS_GENERICOS_ACREDITACION = frozenset({
+    "ac", "o", "u", "y", "e", "de", "del", "la", "el", "los", "las",
+    "en", "por", "para", "con", "sin", "nuevo", "nueva", "taco",
+    "test", "prueba", "examen", "determinacion", "analisis", "perfil",
+})
+
+
+def _terminos_clinicos(nombre_normalizado):
+    """Palabras completas distintivas; no deduce sinónimos clínicos."""
+    return {t for t in nombre_normalizado.split()
+            if len(t) >= 4 and t not in _TERMINOS_GENERICOS_ACREDITACION}
+
+
+def similitud_sugerencia_clinica(nombre_examen, nombre_prestacion):
+    """Devuelve (prioridad, similitud TEXTUAL) con el mismo criterio en ambas carteras.
+
+    Comparar solo caracteres perjudica abreviaturas como «AC. LUPICO» frente
+    a «AC. CIRCULANTES O AC. LUPICO NUEVO»: el nombre íntegro está incluido,
+    pero el texto adicional reduce artificialmente la semejanza global.
+
+    Se compara la frase completa por palabras independientes y se valora su
+    cobertura cuando el nombre consultado tiene varios términos. Los parecidos
+    superficiales sin palabras clínicas compartidas se atenúan solo en estas
+    consultas compuestas; una sola palabra sigue admitiendo errores tipográficos
+    y variantes difusas como PROTROMBINA / PROGESTERONA.
+
+    No traduce siglas, no infiere equivalencias clínicas y no realiza vínculos.
+    """
     objetivo = normalizar(nombre_examen)
+    candidato = normalizar(nombre_prestacion)
+    if not objetivo or not candidato:
+        return 0, 0.0
+    if objetivo == candidato:
+        return 3, 1.0
+
+    literal = SequenceMatcher(None, objetivo, candidato).ratio()
+    terminos_obj = _terminos_clinicos(objetivo)
+    terminos_cand = _terminos_clinicos(candidato)
+    compartidos = terminos_obj & terminos_cand
+    frase_completa = bool(re.search(
+        r"(?<!\w)" + re.escape(objetivo) + r"(?!\w)", candidato))
+
+    if frase_completa:
+        # En una consulta de varias palabras se conserva el orden y la
+        # totalidad de la frase. La cobertura de esa frase (1.0) tiene más
+        # peso que la longitud de los calificadores administrativos.
+        if len(objetivo.split()) > 1 and terminos_obj:
+            puntuacion = 0.25 * literal + 0.75
+        else:
+            # Preservar el criterio ya validado para nombres simples:
+            # PROTROMBINA (TP) 91 %, PROTROMBINA TACO NUEVO 75 %.
+            puntuacion = 0.75 * literal + 0.25
+        return 2, min(1.0, puntuacion)
+
+    if compartidos:
+        cobertura_obj = len(compartidos) / len(terminos_obj)
+        cobertura_cand = len(compartidos) / len(terminos_cand)
+        puntuacion = max(literal, 0.55 + 0.20 * cobertura_obj + 0.10 * cobertura_cand)
+        return 1, min(1.0, puntuacion)
+
+    # «AC. LUPICO» y «ACIDO URICO» se asemejan en caracteres, pero no
+    # comparten «lupico», la palabra distintiva de la consulta. Su semejanza
+    # literal no debería superar una frase que sí conserva el nombre completo.
+    if len(objetivo.split()) > 1 and terminos_obj:
+        literal *= 0.75
+    return 0, literal
+
+
+def _similitud_sugerencia_acreditacion(nombre_examen, nombre_prestacion):
+    """Compatibilidad: Acreditación y CRS utilizan ahora el mismo puntaje."""
+    return similitud_sugerencia_clinica(nombre_examen, nombre_prestacion)
+
+
+def candidatos_acreditacion(
+    db_path, nombre_examen, area, limite=8, similitud_minima=0.0,
+    nombre_referencia=None,
+):
+    """Sugiere prestaciones sin vincularlas automáticamente.
+
+    - Filtra ANTES de limitar a cinco opciones visibles.
+    - Prioriza nombres clínicos compartidos sobre parecidos de caracteres.
+    - Considera el nombre CRS confirmado por el usuario como segunda consulta;
+      no afecta la coincidencia exacta, que solo usa el examen activo.
+    - El área solo desempata: nunca aumenta el porcentaje visible.
+    """
+    consultas = list(dict.fromkeys(filter(None, (
+        normalizar(nombre_examen), normalizar(nombre_referencia),
+    ))))
+    if not consultas or limite <= 0:
+        return []
     area_norm = area_equivalente(area)
     with sqlite3.connect(db_path) as con:
-        filas = con.execute("SELECT id,prestacion,area,prestacion_norm,area_norm FROM prestaciones_acreditacion").fetchall()
-    scored = []
-    for identificador,nombre,nombre_area,nombre_norm,area_dest in filas:
-        ratio = SequenceMatcher(None,objetivo,nombre_norm).ratio() if objetivo else 0
-        if nombre_norm == objetivo:
-            ratio = 1.0
-        score = ratio + (0.02 if area_norm and area_norm==area_dest else 0)
-        scored.append((identificador,nombre,nombre_area,score))
-    scored.sort(key=lambda row:(-row[3],row[1]))
-    return scored[:limite]
+        filas = con.execute(
+            "SELECT id,prestacion,area,prestacion_norm,area_norm "
+            "FROM prestaciones_acreditacion"
+        ).fetchall()
+    candidatas = []
+    for identificador, nombre, nombre_area, nombre_norm, area_dest in filas:
+        # La consulta de la cartera se normaliza con la misma regla que los
+        # nombres almacenados; usar el visible si el índice antiguo está vacío.
+        candidato = normalizar(nombre_norm or nombre)
+        prioridad, ratio = max(
+            (_similitud_sugerencia_acreditacion(consulta, candidato)
+             for consulta in consultas),
+            key=lambda par: (par[0], par[1]),
+        )
+        if ratio < similitud_minima:
+            continue
+        misma_area = bool(area_norm and area_norm == area_dest)
+        candidatas.append((prioridad, ratio, misma_area,
+                           identificador, nombre, nombre_area))
+    candidatas.sort(key=lambda r: (-r[0], -r[1], -r[2], normalizar(r[4]), r[3]))
+    return [(identificador, nombre, nombre_area, ratio)
+            for _, ratio, _, identificador, nombre, nombre_area in candidatas[:limite]]
 
 
 def _buscar_match(con, nombre_examen, area, seleccion_manual=None):
@@ -664,8 +685,9 @@ def obtener_valores_fuentes(db_path, nombre_examen, area=None, seleccion_manual=
     """Regresa (valores, orígenes, prestación vinculada, mensaje).
 
     Preparación: Indicaciones CRS > Acreditación válida > Normas.
-    Para otros campos: Acreditación válida > Normas (si está disponible).
-    Recepción/Procesamiento: exclusivamente Manual; nunca PDF.
+    Procedimiento/Rotulación/Rechazo: Normas válidas > Acreditación válida.
+    Para Muestra/Condiciones: solo Acreditación válida.
+    Recepción/Procesamiento: sin fuente; quedan vacíos salvo edición manual.
     """
     import json
     valores, origen = {}, {}
@@ -674,10 +696,6 @@ def obtener_valores_fuentes(db_path, nombre_examen, area=None, seleccion_manual=
             if campo in CAMPOS_NORMAS and (preparacion_valida(contenido) if campo == "Preparación del paciente" else texto_valido(contenido)):
                 valores[campo] = limpiar_formato_normas(campo, contenido)
                 origen[campo] = "Normas Generales de Toma de Muestras"
-        for campo, contenido in con.execute("SELECT campo, contenido FROM manual_toma_campos"):
-            if campo in CAMPOS_MANUAL and texto_valido(contenido):
-                valores[campo] = contenido
-                origen[campo] = "Manual de toma de muestras"
         fila, mensaje = _buscar_match(con,nombre_examen,area,seleccion_manual)
         seleccion = None
         if fila:
@@ -690,12 +708,17 @@ def obtener_valores_fuentes(db_path, nombre_examen, area=None, seleccion_manual=
                           if campo == "Preparación del paciente"
                           else texto_valido(texto, estados.get(campo)))
                 if valido:
+                    # No sustituir un valor válido de Normas en los tres
+                    # campos cuya fuente institucional principal es Normas.
+                    if (campo in CAMPOS_NORMAS_PRIORITARIAS
+                            and origen.get(campo) == "Normas Generales de Toma de Muestras"):
+                        continue
                     valores[campo] = texto
                     origen[campo] = "Cartera de Acreditación · " + str(estados.get(campo))
         # «Indicaciones» solo se recibe del examen CRS efectivamente emparejado.
-        # Solo para la segunda fuente (Acreditación) «No aplica» activa el
-        # respaldo de Normas. En el CRS la regla solicitada es: primer texto
-        # no vacío y documentado prevalece, aunque diga «No aplica».
+        # «No aplica» documentado en Acreditación ahora es válido y conserva
+        # prioridad sobre Normas. En el CRS prevalece cualquier indicación
+        # no vacía y válida, incluido «No aplica».
         if texto_valido(indicaciones_cartera):
             valores["Preparación del paciente"] = indicaciones_cartera
             origen["Preparación del paciente"] = "Cartera de Exámenes del CRS · Indicaciones"
