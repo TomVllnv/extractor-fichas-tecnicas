@@ -17,6 +17,8 @@ import compatibilidad_excel as ce
 import registro_usuarios_login as rul
 import interfaz_fluida as iflu
 import coincidencias_ui as cui
+import historial_tabla as ht
+import cola_fichas as cf
 from uuid import uuid4
 
 APP_TITLE = 'Herramienta de extracción de datos para laboratorio'
@@ -47,6 +49,58 @@ def formatear_fecha_fuente(fecha_iso):
         return fecha.strftime("%d/%m/%Y %H:%M")
     except (TypeError, ValueError):
         return "Fecha no disponible"
+
+
+def fecha_hoy_nombre_archivo():
+    """DD-MM-AAAA para nombres válidos en Windows; UI usa DD/MM/AAAA."""
+    return datetime.now(ZoneInfo("America/Santiago")).strftime("%d-%m-%Y")
+
+
+def nombre_ficha_tecnica(area, fecha_extraccion=None):
+    """Nombre uniforme para las fichas: área + fecha de extracción DD-MM-AAAA."""
+    area_segura = re.sub(r'[<>:"/\\|?*]+', '_', str(area or "General")).strip()
+    area_segura = re.sub(r"\s+", "_", area_segura).strip("_ .") or "General"
+    fecha = fecha_extraccion or fecha_hoy_nombre_archivo()
+    return f"Ficha_Técnica_{area_segura}_Actualizada_{fecha}.xlsx"
+
+
+def nombre_descarga_excel_generado(nombre, area=None, fecha_registro=None):
+    """Normaliza descargas históricas sin renombrar los archivos guardados.
+
+    Para fichas generadas se conserva la fecha original de extracción, incluso
+    cuando se descargan días después desde SQLite. En documentos importados,
+    la mejor fecha disponible es la registrada al guardar la plantilla.
+    """
+    original = str(nombre or "")
+    patron_fecha = r"(20\d{2}-\d{2}-\d{2}|\d{2}-\d{2}-20\d{2})"
+    auto = re.fullmatch(
+        rf"Ficha_T[eé]cnica_Actualizada_(.+)_({patron_fecha})\.xlsx",
+        original, re.IGNORECASE)
+    moderno = re.fullmatch(
+        rf"Ficha_T[eé]cnica_(.+)_Actualizada_({patron_fecha})\.xlsx",
+        original, re.IGNORECASE)
+    hallado = auto or moderno
+    if hallado:
+        area_archivo = hallado.group(1)
+        fecha_archivo = hallado.group(2)
+        if re.fullmatch(r"20\d{2}-\d{2}-\d{2}", fecha_archivo):
+            fecha_archivo = datetime.strptime(fecha_archivo, "%Y-%m-%d").strftime("%d-%m-%Y")
+        return nombre_ficha_tecnica(area or area_archivo, fecha_archivo)
+
+    if area is None:
+        # Archivo de usuario sin formato generado: respetar el nombre original.
+        return nombre
+
+    fecha = None
+    if fecha_registro and str(fecha_registro) != "Sin registro":
+        marca = re.search(r"(\d{2}/\d{2}/\d{4})", str(fecha_registro))
+        if marca:
+            fecha = marca.group(1).replace("/", "-")
+        else:
+            marca_iso = re.search(r"(20\d{2}-\d{2}-\d{2})", str(fecha_registro))
+            if marca_iso:
+                fecha = datetime.strptime(marca_iso.group(1), "%Y-%m-%d").strftime("%d-%m-%Y")
+    return nombre_ficha_tecnica(area, fecha)
 
 
 def clave_orden_alfabetico(nombre):
@@ -339,6 +393,10 @@ def init_db():
     conn.close()
 
 init_db()
+# Al retirar la fuente antigua, respaldar la SQLite institucional ANTES de
+# eliminar su PDF y dos textos. La limpieza no afecta Normas ni auditorías.
+if fd.hay_manual_heredado(DB_PATH):
+    gp.respaldar(DB_PATH)
 fd.inicializar_fuentes(DB_PATH)
 # Migración aditiva: recupera «LABORATORIO» desde el Excel original ya guardado.
 # No borra fichas, cuentas, documentos ni el historial de SQLite.
@@ -639,14 +697,14 @@ def obtener_lista_cartera_db():
     return sorted((r[0] for r in rows if r[0]), key=clave_orden_alfabetico)
 
 
-def buscar_top_coincidencias_cartera(nombre_buscar, area=None, top_n=8):
-    """Candidatos de la Cartera del CRS, área de «LABORATORIO» y similitud.
+def buscar_top_coincidencias_cartera(nombre_buscar, area=None, top_n=8, similitud_minima=0.0):
+    """Sugerencias CRS: primero el nombre clínico y luego parecidos válidos.
 
-    Mismo criterio de puntuación y prioridad de área que Acreditación.
-    Ningún candidato difuso se empareja automáticamente.
+    Las opciones de otra área siguen disponibles; ninguna coincidencia difusa
+    se vincula automáticamente sin confirmación del encargado.
     """
-    return crs.candidatos_cartera(DB_PATH, nombre_buscar, area, top_n)
-
+    return crs.candidatos_cartera(
+        DB_PATH, nombre_buscar, area, top_n, similitud_minima=similitud_minima)
 
 
 def obtener_info_cartera_por_nombre(nombre_exacto_cartera):
@@ -1020,6 +1078,13 @@ def limpiar_valor_excel(valor, examen_activo=None):
         return valor_str
 
     valor_sin_citas = quitar_citas_superindices(valor)
+    # En algunos PDF el símbolo de viñeta se extrae como un bloque separado
+    # de su texto. Unirlos evita que Excel muestre el marcador aislado arriba
+    # y la instrucción en otro renglón. No se agregan viñetas inexistentes.
+    valor_sin_citas = re.sub(
+        r"(?m)^[ \t]*[•●▪◦∙][ \t]*(?:\n[ \t]*)+(?=\S)",
+        "  • ", valor_sin_citas,
+    )
     # Reconstruir el prefijo de las viñetas tras quitar citas: el limpiador
     # general de citas compacta los espacios, por lo que antes se perdía la
     # sangría y Excel acababa mostrando el marcador pegado al margen.
@@ -1063,8 +1128,8 @@ FIELD_ALIASES_BASE = {
     'Código': [],
     'Nombre LIS': [],
     'Laboratorio de procesamiento': [],
-    'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion'],
-    'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento de muetsras', 'procesamiento'],
+    'Recepción de muestras': [],
+    'Procesamiento de muestras': [],
     'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat', 'tiempo procesamiento'],
     'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'preparacion del paciente', 'preparación del paciente'],
     'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'Procedimiento de examen', 'Procedimiento del examen'],
@@ -1090,8 +1155,8 @@ FIELD_ALIASES_MICROBIOLOGIA = {
     'Código': [],
     'Nombre LIS': [],
     'Laboratorio de procesamiento': [],
-    'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion'],
-    'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'tiempo siembra'],
+    'Recepción de muestras': [],
+    'Procesamiento de muestras': [],
     'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat', 'tiempo incubacion', 'dias cultivo'],
     'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'preparacion del paciente'],
     'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'obtencion muestra microbiologica', 'tecnica hisopado', 'toma de muestra'],
@@ -1117,8 +1182,8 @@ FIELD_ALIASES_HEMATOLOGIA = {
     'Código': [],
     'Nombre LIS': [],
     'Laboratorio de procesamiento': [],
-    'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion'],
-    'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'homogeneizacion'],
+    'Recepción de muestras': [],
+    'Procesamiento de muestras': [],
     'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat', 'tiempo procesamiento'],
     'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'ayuno hematologia'],
     'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'puncion venosa', 'anticoagulante edta', 'tubo citrato'],
@@ -1144,8 +1209,8 @@ FIELD_ALIASES_BIOQUIMICA = {
     'Código': [],
     'Nombre LIS': [],
     'Laboratorio de procesamiento': [],
-    'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion'],
-    'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'centrifugacion', 'tiempo suero'],
+    'Recepción de muestras': [],
+    'Procesamiento de muestras': [],
     'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat'],
     'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'ayuno de 8 a 12 horas', 'restricción dietética'],
     'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'puncion venosa', 'tubo suero gel'],
@@ -1171,8 +1236,8 @@ FIELD_ALIASES_HORMONAS = {
     'Código': [],
     'Nombre LIS': [],
     'Laboratorio de procesamiento': [],
-    'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion'],
-    'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento'],
+    'Recepción de muestras': [],
+    'Procesamiento de muestras': [],
     'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat'],
     'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'hora de toma de muestra', 'ritmo circadiano', 'ciclo menstrual'],
     'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'puncion venosa'],
@@ -1198,8 +1263,8 @@ FIELD_ALIASES_DERIVADOS = {
     'Código': [],
     'Nombre LIS': [],
     'Laboratorio de procesamiento': [],
-    'Recepción de muestras': ['recepcion de muestras', 'recepción de muestras', 'recepcion'],
-    'Procesamiento de muestras': ['procesamiento de muestras', 'procesamiento', 'preparacion envio'],
+    'Recepción de muestras': [],
+    'Procesamiento de muestras': [],
     'Plazo entrega resultados': ['tiempo de respuesta', 'plazo entrega resultados', 'plazo de entrega', 'tat derivación', 'dias hábiles'],
     'Preparación del paciente': ['preparacion paciente', 'preparación paciente', 'indicaciones laboratorio externo'],
     'Procedimiento de toma de muestras': ['Procedimiento', 'Procedimiento de toma de muestras', 'protocolo de derivación'],
@@ -1257,8 +1322,23 @@ def norm(s):
     import unicodedata
     s = str(s or '').strip().lower()
     s = ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+    s = re.sub(r'\s*[:：]+\s*$', '', s)
     s = re.sub(r'\s+', ' ', s)
     return s
+
+
+def nombre_campo_visible(nombre):
+    """Retira dos puntos al final de un nombre de campo, no del valor."""
+    return re.sub(r"\s*[:：]+\s*$", "", str(nombre or "").strip())
+
+
+def normalizar_etiquetas_ficha(ws):
+    """Presentación uniforme para la hoja del examen, sin alterar B ni SQLite."""
+    for fila in range(1, ws.max_row + 1):
+        celda = ws.cell(fila, 1)
+        if isinstance(celda.value, str):
+            celda.value = nombre_campo_visible(celda.value)
+
 
 
 def _superindices_visuales_en_pagina(pagina):
@@ -1292,7 +1372,95 @@ def _superindices_visuales_en_pagina(pagina):
     return marcados
 
 
-def extract_pdf_text(uploaded_bytes, filename, examen_activo=None):
+
+def _membrete_clinico_hematologia(pagina, numero_pagina):
+    """Identifica por POSICIÓN las líneas repetidas de cabecera de una página.
+
+    Se descartan únicamente en la extracción clínica de Hematología: las
+    referencias bibliográficas abren de nuevo los bytes originales del PDF.
+    Un encabezado solo se reconoce cuando parece un título de portada en la
+    zona superior de una página posterior; los títulos de secciones científicas
+    y el contenido inferior de tablas nunca se consideran membretes.
+    """
+    if numero_pagina <= 1:
+        return set()
+    alto = float(pagina.rect.height)
+    ancho = float(pagina.rect.width)
+    limite_superior = min(205.0, alto * 0.30)
+    lineas = []
+    for bloque in pagina.get_text("dict").get("blocks", []):
+        if bloque.get("type") != 0:
+            continue
+        for linea in bloque.get("lines", []):
+            spans = [x for x in linea.get("spans", []) if str(x.get("text", "")).strip()]
+            if not spans:
+                continue
+            texto = "".join(x.get("text", "") for x in spans).strip()
+            x0, y0, _, _ = linea.get("bbox", (ancho, alto, ancho, alto))
+            if not texto or y0 > limite_superior:
+                continue
+            lineas.append((float(y0), float(x0), max(float(x.get("size", 0)) for x in spans), texto))
+    lineas.sort(key=lambda dato: (dato[0], dato[1]))
+    if not lineas:
+        return set()
+
+    # Códigos editoriales habituales (p. ej. ms_07153414190V5.0), no
+    # identificadores analíticos ni resultados de laboratorio.
+    patron_codigo = re.compile(r"(?i)^(?:ms[_-]?\d{7,}[a-z0-9._-]*|\d{9,}v\d+(?:\.\d+)+)$")
+    codigos = [(y, x, texto) for y, x, _, texto in lineas if patron_codigo.fullmatch(texto)]
+    descartadas = {texto for _, _, texto in codigos}
+    # La tipografía grande ayuda a distinguir la cabecera del examen de
+    # encabezados técnicos válidos como «Límites e intervalos».
+    titulos_seccion = {norm(t) for t in SECCIONES_DOCUMENTO_MAESTRAS}
+    titulos = [(y, x, texto) for y, x, size, texto in lineas
+               if (size >= 17 and x < ancho * 0.65 and 3 <= len(texto) <= 90
+                   and norm(texto) not in titulos_seccion
+                   and not patron_codigo.fullmatch(texto)
+                   and not re.match(r"(?i)^(?:cobas[®™]?|roche diagnostics)", texto))]
+    if not titulos:
+        return descartadas
+    # Evita suprimir el título válido de una sección si no hay un membrete
+    # próximo o un título inequívocamente destacado.
+    for y, x, titulo in titulos:
+        cerca_codigo = any(0 <= y - yc <= 75 for yc, _, _ in codigos)
+        if not cerca_codigo and not (y <= min(125, alto * 0.18) and len(titulo) <= 55):
+            continue
+        descartadas.add(titulo)
+        # Los subtítulos ingleses inmediatos («Prothrombin Time») son parte
+        # del membrete, pero no una tabla ni otro encabezado técnico.
+        for y2, x2, size2, texto2 in lineas:
+            if (y < y2 <= y + 37 and abs(x2 - x) < 75
+                    and 3 <= len(texto2) <= 75 and size2 <= 16
+                    and norm(texto2) not in titulos_seccion
+                    and not re.search(r"[:=|\d]|°|µ|μ|%", texto2)):
+                descartadas.add(texto2)
+        break
+    return descartadas
+
+
+def _limpiar_membrete_ocr_hematologia(texto, numero_pagina):
+    """Respaldo prudente para OCR sin coordenadas: requiere un código ms_."""
+    if numero_pagina <= 1:
+        return texto
+    lineas = str(texto).splitlines()
+    codigo = re.compile(r"(?i)^ms[_-]?\d{7,}[a-z0-9._-]*$")
+    for i, linea in enumerate(lineas[:9]):
+        if not codigo.fullmatch(linea.strip()):
+            continue
+        lineas[i] = ""
+        # La portada abreviada y su subtítulo siguen al código en OCR.
+        for j in range(i+1, min(i+3, len(lineas))):
+            frase = lineas[j].strip()
+            if (frase and len(frase) < 70 and not re.search(r"[:=|\d]|°|µ|μ", frase)
+                    and norm(frase) not in {norm(t) for t in SECCIONES_DOCUMENTO_MAESTRAS}):
+                lineas[j] = ""
+            else:
+                break
+        break
+    return "\n".join(lineas)
+
+
+def extract_pdf_text(uploaded_bytes, filename, examen_activo=None, hematologia=False):
     """Extrae cada página independientemente; usa OCR solo donde falta texto.
 
     Mantiene el contrato anterior: (texto, descripción_del_método).
@@ -1316,11 +1484,19 @@ def extract_pdf_text(uploaded_bytes, filename, examen_activo=None):
             page_width = page.rect.width
             valid_blocks = []
             superscripts = _superindices_visuales_en_pagina(page)
+            # Solo Hematología: limpiar por posición el membrete de la página
+            # siguiente sin eliminar la continuación de tablas o párrafos.
+            lineas_membrete = (_membrete_clinico_hematologia(page, numero)
+                               if hematologia else set())
             for b in page.get_text("blocks"):
                 if b[6] != 0:
                     continue
                 x0, y0, x1, y1 = b[:4]
                 content = superscripts.get(b[5], b[4])
+                if lineas_membrete:
+                    content = "\n".join(
+                        linea for linea in content.splitlines()
+                        if linea.strip() not in lineas_membrete)
                 content = content.strip()
                 if not content:
                     continue
@@ -1352,7 +1528,8 @@ def extract_pdf_text(uploaded_bytes, filename, examen_activo=None):
                     result, _ = engine(np.array(image))
                     ocr_text = "\n".join(str(line[1]) for line in (result or []) if len(line) > 1)
                     if len(re.sub(r"\s", "", ocr_text)) > len(re.sub(r"\s", "", page_text)):
-                        page_text = ocr_text
+                        page_text = (_limpiar_membrete_ocr_hematologia(ocr_text, numero)
+                                     if hematologia else ocr_text)
                         paginas_ocr.append(numero)
                 except ImportError:
                     # Mantener texto digital disponible; si todo es imagen, informar.
@@ -1491,6 +1668,59 @@ def es_alias_hematologia(field_aliases):
     )
 
 
+def extraer_limite_deteccion_hematologia(texto):
+    """Extrae el valor explícito solo del apartado «Límites e intervalos».
+
+    Los insertos Roche pueden expresar la unidad como «µg de UEF/mL» o
+    «UEF/mL», y separar la etiqueta, el signo igual y el valor en líneas
+    distintas. Nunca se obtiene el dato de linealidad, cuantificación u otras
+    secciones del PDF.
+    """
+    if not texto:
+        return ""
+    texto = str(texto).replace("\r\n", "\n").replace("\r", "\n")
+    lineas = texto.split("\n")
+    titulo = re.compile(r"^l[ií]mites\s+e\s+intervalos\s*[:：]?\s*$", re.I)
+    etiqueta = r"l[ií]mite\s+de\s+detecci[oó]n"
+    numero = r"(?:[<>≤≥≈]\s*)?\d+(?:[.,]\d+)?"
+    unidades_basicas = r"(?:UEF|UI|IU|mIU|mU|U|ng|pg|µg|μg|ug|mcg|mg|g|copias)"
+    unidad_simple = rf"{unidades_basicas}\s*/\s*(?:mL|dL|L)"
+    unidad_compuesta = rf"(?:µg|μg|ug|mcg|ng|pg|mg|g)\s+de\s+{unidad_simple}"
+    patron = re.compile(
+        rf"{etiqueta}\s*[=:：]\s*(?P<valor>{numero}\s*(?:{unidad_compuesta}|{unidad_simple}))\b",
+        re.I,
+    )
+    # Los títulos de las subsecciones «Intervalo de medición» y «Límites
+    # inferiores de medición» pertenecen a este apartado; no lo cierran.
+    titulos_que_cierran = {
+        norm(encabezado) for encabezado in SECCIONES_DOCUMENTO_MAESTRAS
+        if norm(encabezado) != norm("Límites e intervalos")
+    }
+    titulos_que_cierran.update({
+        "valores esperados", "referencias", "especificidad", "interferencias",
+        "exactitud", "repetibilidad", "imprecision", "rendimiento analitico",
+        "rendimiento del test", "correlacion", "interpretacion de resultados",
+        "precision", "valores teoricos", "caracteristicas", "uso previsto",
+        "control de calidad", "comparacion de metodos", "referencias bibliograficas",
+    })
+    for i, linea in enumerate(lineas):
+        if not titulo.fullmatch(linea.strip()):
+            continue
+        seccion = []
+        # Las medidas pertenecen a la misma sección; un título de otra sección
+        # cierra la búsqueda. El límite también evita recorrer todo el PDF.
+        for siguiente in lineas[i + 1: i + 65]:
+            if norm(siguiente) in titulos_que_cierran:
+                break
+            seccion.append(siguiente)
+            if sum(len(x) for x in seccion) > 4500:
+                break
+        coincidencia = patron.search("\n".join(seccion))
+        if coincidencia:
+            return re.sub(r"\s+", " ", coincidencia.group("valor")).strip()
+    return ""
+
+
 def parse_labeled_text(text, field_aliases=None, examen_activo=None):
     if field_aliases is None:
         field_aliases = FIELD_ALIASES_BASE
@@ -1560,6 +1790,13 @@ def parse_labeled_text(text, field_aliases=None, examen_activo=None):
         found[k] = val_limpio
 
     if es_alias_hematologia(field_aliases):
+        # Esta medida solo se toma cuando el PDF incluye el encabezado exacto;
+        # nunca se infiere a partir de «Rango de linealidad» u otros valores.
+        limite = extraer_limite_deteccion_hematologia(text)
+        if limite:
+            found["Límite de detección"] = limite
+        else:
+            found.pop("Límite de detección", None)
         seccion = extraer_valores_teoricos_hematologia(text)
         if seccion:
             found['Valores de referencia'] = seccion
@@ -1656,7 +1893,8 @@ def consolidar_documentos_pdf(documentos, field_aliases, nombre_examen):
     textos = []
     metodos = []
     for nombre, contenido in documentos:
-        texto, metodo = extract_pdf_text(contenido, nombre, nombre_examen)
+        texto, metodo = extract_pdf_text(contenido, nombre, nombre_examen,
+                                          hematologia=es_alias_hematologia(field_aliases))
         encontrados = infer_name_code(texto, parse_labeled_text(texto, field_aliases, nombre_examen))
         encontrados = {campo: val for campo, val in encontrados.items() if campo not in fd.CAMPOS_CONTROLADOS}
         textos.append(f"===== {nombre} =====\n{texto}")
@@ -1690,10 +1928,12 @@ def process(uploaded_bytes, filename, template_bytes, centro='', nombre_examen='
             [(filename, uploaded_bytes)] + documentos_adicionales, field_aliases, nombre_examen
         )
     else:
-        text, method = extract_pdf_text(uploaded_bytes, filename, nombre_examen)
+        text, method = extract_pdf_text(uploaded_bytes, filename, nombre_examen,
+                                        hematologia=es_alias_hematologia(field_aliases))
         data = infer_name_code(text, parse_labeled_text(text, field_aliases, nombre_examen))
 
-    # Los ocho campos documentales proceden EXCLUSIVAMENTE de SQLite.
+    # Los seis campos documentales admitidos se obtienen de fuentes SQLite;
+    # Recepción y Procesamiento no se toman de ninguna fuente ni del PDF.
     data = {campo: val for campo, val in data.items() if campo not in fd.CAMPOS_CONTROLADOS}
     if datos_sobrescribir:
         for campo, val in datos_sobrescribir.items():
@@ -1729,6 +1969,8 @@ def process(uploaded_bytes, filename, template_bytes, centro='', nombre_examen='
     else:
         ws = crear_hoja_examen(wb, nombre_examen, field_aliases)
         score, reason = 1.0, 'Ficha nueva creada desde el examen seleccionado'
+
+    normalizar_etiquetas_ficha(ws)
 
     # Evitar datos obsoletos si una ficha anterior ya contenía alguno de estos campos.
     for fila in range(1, ws.max_row + 1):
@@ -1859,10 +2101,13 @@ def aplicar_formato_normas_excel(excel_bytes, nombre_examen, origen_campos):
     return salida.getvalue()
 
 
-def aplicar_ediciones_a_excel(excel_bytes, edited_df, nombre_examen):
+def aplicar_ediciones_a_excel(excel_bytes, edited_df, nombre_examen, campos_forzar=None):
     wb = load_workbook(io.BytesIO(excel_bytes), rich_text=True)
 
     ws = buscar_hoja_por_examen(wb, nombre_examen)
+    # Una discrepancia validada es una decisión explícita aunque su estado
+    # figure como «Encontrado», no «Modificado por usuario».
+    forzados = {norm(campo) for campo in (campos_forzar or ())}
     modificado = False
     if ws is not None:
         filas = {}
@@ -1888,7 +2133,9 @@ def aplicar_ediciones_a_excel(excel_bytes, edited_df, nombre_examen):
                 # el encargado haya editado la celda. Evitar convertir listas
                 # enriquecidas a prosa durante un rerun de Streamlit.
                 # El borrado deliberado sí se aplica al quedar el texto vacío.
-                if estado_tabla and estado_tabla != "Modificado por usuario" and val_editado:
+                if (campo_norm not in forzados
+                        and estado_tabla and estado_tabla != "Modificado por usuario"
+                        and val_editado):
                     continue
                 # Si el texto no cambió, conservar intactos los fragmentos
                 # enriquecidos (negritas APA y títulos de Normas generales).
@@ -1924,9 +2171,85 @@ def aplicar_ediciones_a_excel(excel_bytes, edited_df, nombre_examen):
 
     if not modificado:
         return excel_bytes  # Evita modificar el contenedor XLSX en cada rerun.
+    # Ajuste autónomo en Python: no se requiere Excel de escritorio ni VBA.
+    if ws is not None:
+        ajustar_ancho_columnas(ws)
+        for fila in range(1, ws.max_row + 1):
+            ajustar_alto_fila_con_listas(ws, fila)
     out_buf = io.BytesIO()
     wb.save(out_buf)
     return out_buf.getvalue()
+
+
+def campo_marcado_para_actualizar(valor):
+    """Interpreta la casilla de AG Grid sin tratar la cadena 'false' como True."""
+    if isinstance(valor, str):
+        return valor.strip().casefold() not in ("false", "0", "no", "", "off")
+    if valor is None:
+        return True
+    try:
+        if pd.isna(valor):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return bool(valor)
+
+
+def respetar_campos_no_seleccionados(excel_nuevo, excel_anterior, nombre_examen, seleccion):
+    """Restituye solo campos desmarcados desde la plantilla previa en Excel.
+
+    Se hace sobre una copia al descargar o confirmar en SQLite: el resultado
+    editable conserva todos los valores propuestos por si se vuelve a marcar.
+    """
+    excluidos = {norm(campo) for campo, marcar in (seleccion or {}).items()
+                 if not campo_marcado_para_actualizar(marcar)}
+    if not excluidos:
+        return excel_nuevo
+    libro_nuevo = load_workbook(io.BytesIO(excel_nuevo), rich_text=True)
+    hoja_nueva = buscar_hoja_por_examen(libro_nuevo, nombre_examen)
+    if hoja_nueva is None:
+        return excel_nuevo
+    hoja_anterior = None
+    if excel_anterior:
+        libro_anterior = load_workbook(io.BytesIO(excel_anterior), rich_text=True)
+        hoja_anterior = buscar_hoja_por_examen(libro_anterior, nombre_examen)
+    origen = {}
+    if hoja_anterior is not None:
+        origen = {norm(str(hoja_anterior.cell(r, 1).value or '')): hoja_anterior.cell(r, 2)
+                  for r in range(1, hoja_anterior.max_row + 1)}
+    cambios = False
+    for r in range(1, hoja_nueva.max_row + 1):
+        campo = norm(str(hoja_nueva.cell(r, 1).value or ''))
+        if campo not in excluidos:
+            continue
+        celda = hoja_nueva.cell(r, 2)
+        antigua = origen.get(campo)
+        if antigua is not None:
+            celda.value = copy.copy(antigua.value)
+            # Nunca copiar _style entre libros diferentes: sus índices de
+            # fuentes/rellenos pueden diferir e invalidar el XLSX resultante.
+            celda.font = copy.copy(antigua.font)
+            celda.fill = copy.copy(antigua.fill)
+            celda.border = copy.copy(antigua.border)
+            celda.alignment = copy.copy(antigua.alignment)
+            celda.protection = copy.copy(antigua.protection)
+            celda.number_format = antigua.number_format
+            celda.hyperlink = copy.copy(antigua.hyperlink) if antigua.hyperlink else None
+            celda.comment = copy.copy(antigua.comment) if antigua.comment else None
+        else:
+            celda.value = None  # No existía valor previo para este examen.
+        ajustar_alto_fila_con_listas(hoja_nueva, r)
+        cambios = True
+    if not cambios:
+        return excel_nuevo
+    # Restaurar un párrafo largo puede volver a ampliar la columna; la altura
+    # de las otras filas depende de ese ancho, por eso se ajustan juntas.
+    ajustar_ancho_columnas(hoja_nueva)
+    for fila in range(1, hoja_nueva.max_row + 1):
+        ajustar_alto_fila_con_listas(hoja_nueva, fila)
+    salida = io.BytesIO()
+    libro_nuevo.save(salida)
+    return salida.getvalue()
 
 
 def validar_excel_para_descarga(excel_bytes):
@@ -1985,7 +2308,9 @@ def comparar_plantillas_excel(bytes_antiguo, bytes_nuevo, nombre_examen):
                     campo = str(ws.cell(r, 1).value or '').strip()
                     valor = str(ws.cell(r, 2).value or '').strip()
                     if campo:
-                        datos_examen[campo] = "" if valor.casefold() in ["nan", "none", "null"] else valor
+                        datos_examen[norm(campo)] = (
+                            nombre_campo_visible(campo),
+                            "" if valor.casefold() in ["nan", "none", "null"] else valor)
             return datos_examen, len(hojas), hojas, ws is not None
         except Exception:
             return {}, 0, [], False
@@ -1993,15 +2318,15 @@ def comparar_plantillas_excel(bytes_antiguo, bytes_nuevo, nombre_examen):
     datos_ant, total_hojas_ant, hojas_ant, existe_ant = extraer_datos_fichas(bytes_antiguo)
     datos_nue, total_hojas_nue, hojas_nue, existe_nue = extraer_datos_fichas(bytes_nuevo)
 
-    campos_completados_ant = sum(1 for v in datos_ant.values() if v)
-    campos_completados_nue = sum(1 for v in datos_nue.values() if v)
+    campos_completados_ant = sum(1 for _, v in datos_ant.values() if v)
+    campos_completados_nue = sum(1 for _, v in datos_nue.values() if v)
 
     diferencias = []
     todos_campos = list(dict.fromkeys(list(datos_ant.keys()) + list(datos_nue.keys())))
 
     for campo in todos_campos:
-        val_ant = datos_ant.get(campo, "")
-        val_nue = datos_nue.get(campo, "")
+        etiqueta_ant, val_ant = datos_ant.get(campo, (campo, ""))
+        etiqueta_nue, val_nue = datos_nue.get(campo, (campo, ""))
 
         if val_ant != val_nue:
             if not val_ant and val_nue:
@@ -2012,7 +2337,7 @@ def comparar_plantillas_excel(bytes_antiguo, bytes_nuevo, nombre_examen):
                 tipo = "Información modificada"
 
             diferencias.append({
-                "Campo": campo,
+                "Campo": nombre_campo_visible(etiqueta_nue or etiqueta_ant),
                 "Valor anterior": val_ant or "(Vacío)",
                 "Valor nuevo": val_nue or "(Vacío)",
                 "Tipo de cambio": tipo
@@ -2251,7 +2576,7 @@ def export_imported_workbook(template_bytes, fmt, selected_sheet=None):
 
 
 def guide_tab():
-    st.subheader("Guía de desarrollo seguro")
+    st.subheader("Guía de desarrollo seguro", anchor=False)
     st.write("Esta guía reúne prácticas recomendadas para desarrollar, probar y mantener la herramienta.")
     with st.expander("1. Protección de documentos y datos", expanded=False):
         st.markdown(
@@ -2313,6 +2638,12 @@ st.markdown("""
         font-size: 0.95rem;
         margin-bottom: 20px;
     }
+
+    /* Solo el valor del examen tiene color; la etiqueta conserva el color del tema. */
+    .sidebar-examen-activo {font-weight:600; line-height:1.55; overflow-wrap:anywhere;}
+    .sidebar-examen-activo span {color:#50e89a;}
+    .sidebar-examen-sin-seleccionar {font-weight:600; line-height:1.55;}
+    .sidebar-examen-sin-seleccionar span {color:#ffb45b;}
 
     /* Botón de avance: azul, independiente del tema del resto de Streamlit. */
     .st-key-contenedor_continuar_examen button {
@@ -2395,7 +2726,8 @@ st.markdown("""
   .st-key-reinicio_flotante {
       position: fixed !important;
       right: 22px;
-      bottom: 24px;
+      /* Por encima del panel «Manage app» de Streamlit Community Cloud. */
+      bottom: 78px;
       z-index: 1001;
       width: 56px !important;
       min-width: 56px !important;
@@ -2517,7 +2849,7 @@ st.markdown("""
   }
   @media (max-width: 640px) {
       .st-key-reinicio_flotante {
-          right: 12px; bottom: 76px;
+          right: 12px; bottom: 96px;
           width: 48px !important; min-width: 48px !important;
       }
       .st-key-reinicio_flotante button {
@@ -2566,7 +2898,8 @@ if cartera_expirada:
     </div>
     """, unsafe_allow_html=True)
 
-st.title(APP_TITLE)
+st.markdown('<style>\n[data-testid="stHeaderActionElements"],\n[data-testid="stMarkdownContainer"] :is(h1,h2,h3,h4,h5,h6) a[href^="#"] { display:none !important; }\n[data-testid="stElementContainer"]:has([data-testid="stImage"]) [data-testid="stElementToolbar"],\n[data-testid="stImage"] button,\n[data-testid="stImage"] .overlayBtn,\n.st-key-traza_previa_modificaciones [data-testid="stElementToolbar"],\n.st-key-traza_previa_actividad [data-testid="stElementToolbar"] { display:none !important; }\n</style>', unsafe_allow_html=True)
+st.title(APP_TITLE, anchor=False)
 if "mensaje_cambio_confirmado" in st.session_state:
     st.success(st.session_state.pop("mensaje_cambio_confirmado"))
 if "mensaje_respaldo" in st.session_state:
@@ -2601,7 +2934,7 @@ if st.session_state.get("id_ultimo_cambio_compartido") != id_ultimo_cambio:
 ETIQUETAS_RECURSO = {
     "fuente:cartera_examenes": "Cartera de exámenes",
     "fuente:cartera_acreditacion": "Cartera de acreditación",
-    "fuente:manual_toma_muestras": "Manual de toma de muestras",
+    "fuente:manual_toma_muestras": "Manual de toma de muestras",  # Trazabilidad histórica
     "fuente:normas_generales": "Normas generales de toma de muestras",
     "catalogo:laboratorios": "Lista de laboratorios",
     "catalogo:encargados": "Lista de encargados",
@@ -2665,9 +2998,6 @@ def _escribir_cambio(con, pendiente):
     if tipo == "acreditacion":
         n = fd.guardar_cartera_acreditacion(DB_PATH, archivo, nombre, conexion=con)
         return f"Cartera actualizada: {n} prestaciones."
-    if tipo == "manual":
-        n = fd.guardar_manual_toma(DB_PATH, archivo, nombre, conexion=con)
-        return f"Manual actualizado: {n} apartados."
     if tipo == "normas":
         n = fd.guardar_normas(DB_PATH, archivo, nombre, conexion=con)
         return f"Normas actualizadas: {n} apartados."
@@ -2741,6 +3071,7 @@ def _cerrar_discrepancias_por_x():
 
 def _cerrar_planilla_por_x():
     st.session_state["modal_confirmar_planilla_abierto"] = False
+    st.session_state.pop("excel_para_actualizar", None)
     st.session_state.pop("revision_plantilla_pendiente", None)
     st.session_state.pop("metadata_plantilla_pendiente", None)
 
@@ -2844,10 +3175,13 @@ def _guardar_resolucion_en_ficha(datos, campos_resueltos):
         })
     nuevo_excel = aplicar_ediciones_a_excel(
         st.session_state["result_bytes"], pd.DataFrame(filas),
-        st.session_state.get("examen_activo", ""))
+        st.session_state.get("examen_activo", ""),
+        campos_forzar=campos_resueltos)
     st.session_state["result_bytes"] = nuevo_excel
     st.session_state["data_extracted"] = datos
     st.session_state["user_edited_fields"] = anteriores
+    st.session_state.pop("historial_edicion_tabla", None)
+    st.session_state.pop("campos_restaurados_tabla", None)
 
 
 def _mensaje_discrepancias(cantidad, origen):
@@ -3001,16 +3335,25 @@ def modal_discrepancias_unificadas():
 @st.dialog("Confirmar actualización en base de datos", width="large", on_dismiss=_cerrar_planilla_por_x)
 def modal_confirmar_actualizacion_planilla():
     area_activa = st.session_state.get("area_activa")
-    examen_activo = st.session_state.get("examen_activo")
+    cierre_omision = bool(st.session_state.get("cola_pdf_finalizada_omision"))
+    examen_activo = (st.session_state.get("examen_resultado") if cierre_omision
+                     else st.session_state.get("examen_activo"))
     comp = st.session_state.get("comparacion_planilla_detalles", {})
 
-    st.markdown(f"Estás a punto de reemplazar la **base de datos guardada en SQLite** para el área **{area_activa}** con los datos recién procesados del examen **{examen_activo}**.")
+    if cierre_omision:
+        st.markdown(
+            f"Estás a punto de actualizar la **base de datos del área {area_activa}** "
+            "con las fichas efectivamente procesadas en esta cola. "
+            "Los documentos omitidos no se han analizado ni modificado."
+        )
+    else:
+        st.markdown(f"Estás a punto de reemplazar la **base de datos guardada en SQLite** para el área **{area_activa}** con los datos recién procesados del examen **{examen_activo}**.")
     st.write("")
 
     col_m1, col_m2, col_m3 = st.columns(3)
     with col_m1:
         st.metric(
-            label="Campos del examen",
+            label="Campos de las fichas" if cierre_omision else "Campos del examen",
             value=f"{comp.get('campos_completados_despues', 0)} completados",
             delta=f"{comp.get('campos_completados_despues', 0) - comp.get('campos_completados_antes', 0)} vs versión anterior"
         )
@@ -3018,7 +3361,9 @@ def modal_confirmar_actualizacion_planilla():
         st.metric(
             label="Exámenes/Hojas en área",
             value=f"{comp.get('hojas_despues', 0)} hojas",
-            delta=f"+1 nuevo examen" if comp.get("es_nueva_hoja") else "Misma cantidad"
+            delta=(f"{comp.get('hojas_despues', 0) - comp.get('hojas_antes', 0):+d} hojas"
+                   if cierre_omision else
+                   "+1 nuevo examen" if comp.get("es_nueva_hoja") else "Misma cantidad")
         )
     with col_m3:
         st.metric(
@@ -3041,10 +3386,10 @@ def modal_confirmar_actualizacion_planilla():
             hide_index=True,
             height=min(480, max(160, 36 * (len(df_dif) + 2))),
             column_config={
-                "Campo": st.column_config.TextColumn("Campo", width="medium"),
-                "Tipo de cambio": st.column_config.TextColumn("Tipo de cambio", width="small"),
-                "Valor anterior": st.column_config.TextColumn("Valor anterior", width="large"),
-                "Valor nuevo": st.column_config.TextColumn("Valor nuevo", width="large"),
+                "Campo": st.column_config.TextColumn("Campo", width=180),
+                "Tipo de cambio": st.column_config.TextColumn("Tipo de cambio", width=190),
+                "Valor anterior": st.column_config.TextColumn("Valor anterior", width=260),
+                "Valor nuevo": st.column_config.TextColumn("Valor nuevo", width=260),
             },
         )
     else:
@@ -3071,9 +3416,9 @@ def modal_confirmar_actualizacion_planilla():
         if st.button("Confirmar y actualizar base de datos del área", type="primary", use_container_width=True,
                      key="btn_confirmar_guardado_ficha", disabled=not validado or conflicto):
             try:
-                nombre_generado = (f"Ficha_Tecnica_Actualizada_{area_activa.replace(' ', '_')}_"
-                                   f"{datetime.now(ZoneInfo('America/Santiago')).strftime('%Y-%m-%d')}.xlsx")
-                contenido = st.session_state["result_bytes"]
+                nombre_generado = nombre_ficha_tecnica(
+                    area_activa, st.session_state.get("fecha_ultima_extraccion_ficha"))
+                contenido = st.session_state.get("excel_para_actualizar", st.session_state["result_bytes"])
                 def guardar_conexion(con):
                     ok, mensaje = guardar_plantilla_area_db(area_activa, contenido, nombre_generado, conexion=con)
                     if not ok:
@@ -3090,6 +3435,7 @@ def modal_confirmar_actualizacion_planilla():
                     st.session_state["mensaje_respaldo"] = f"Atención: cambio guardado, pero falló su respaldo: {respaldo_error}"
                 st.session_state["modal_confirmar_planilla_abierto"] = False
                 st.session_state.pop("comparacion_planilla_detalles", None)
+                st.session_state.pop("excel_para_actualizar", None)
                 st.session_state.pop("revision_plantilla_pendiente", None)
                 st.session_state.pop("metadata_plantilla_pendiente", None)
                 st.session_state["mensaje_cambio_confirmado"] = mensaje
@@ -3099,6 +3445,7 @@ def modal_confirmar_actualizacion_planilla():
     with col_save2:
         if st.button("Cancelar", use_container_width=True, key="btn_cancelar_guardado_ficha"):
             st.session_state["modal_confirmar_planilla_abierto"] = False
+            st.session_state.pop("excel_para_actualizar", None)
             st.rerun()
 
 
@@ -3118,7 +3465,7 @@ def _limpiar_seleccion_area(area, key_sel):
 
 @st.dialog("Seleccionar y administrar exámenes", on_dismiss=_cerrar_examenes_por_x)
 def modal_examenes_area(area):
-    st.subheader(area)
+    st.subheader(area, anchor=False)
     examenes = st.session_state["examenes_por_area"].get(area, [])
     actual = st.session_state.get("examen_activo") if st.session_state.get("area_activa") == area else None
     
@@ -3220,6 +3567,7 @@ CLAVES_TRABAJO_AREA = (
     "laboratorio_activo", "sel_lab_main", "actualizado_activo", "sel_act_main",
     "autorizado_activo", "sel_aut_main",
     "data_extracted", "user_edited_fields", "result_bytes", "extracted_text",
+    "fecha_ultima_extraccion_ficha", "seleccion_campos_excel", "excel_para_actualizar",
     "raw_extracted_text", "fuentes_pdf", "discrepancias_pdf",
     "conflictos_pendientes", "origen_campos_documentales",
     "prestacion_acreditacion_vinculada", "estado_vinculacion_acreditacion",
@@ -3227,6 +3575,8 @@ CLAVES_TRABAJO_AREA = (
     "revision_plantilla_pendiente", "metadata_plantilla_pendiente",
     "comparacion_planilla_detalles", "confirmar_planilla_generada",
     "orden_nombres_pdf", "modo_pdf_anterior", "modo_procesamiento_pdf",
+    "cola_pdf_omitidos", "cola_pdf_procesados", "cola_pdf_finalizada_omision",
+    "historial_edicion_tabla", "campos_restaurados_tabla",
     "pdf_preview_documento_conjunto", "imported_excel_format",
     "imported_excel_sheet", "del_lab_select", "del_act_select",
     "del_aut_select", "nombre_nuevo_laboratorio", "nombre_nuevo_actualizado",
@@ -3259,14 +3609,76 @@ def reiniciar_trabajo_por_cambio_area():
     st.session_state["mostrar_modal_examenes"] = False
 
 
+def progreso_pendiente_cambio_area(estado):
+    """Distingue archivos en widgets de campos realmente elegidos o completados."""
+    generacion = estado.get("generacion_cargas_area", 0)
+    archivos = any(bool(estado.get(clave)) for clave in (
+        f"pdf_uploader_{generacion}",
+        f"excel_exportacion_uploader_{generacion}",
+    ))
+    campos = any(bool(estado.get(clave)) for clave in (
+        "examen_activo", "laboratorio_activo", "actualizado_activo",
+        "autorizado_activo", "data_extracted", "user_edited_fields",
+        "result_bytes", "extracted_text",
+    ))
+    return archivos, campos
+
+
 def seleccionar_area(area):
-    """Cambiar de área limpia PDF y formularios, sin alterar SQLite ni el acceso."""
+    """Solicita confirmación solo si cambiar de área descartaría trabajo temporal."""
     if area not in AREA_CONFIG:
         raise ValueError("Área de laboratorio desconocida")
-    if st.session_state.get("area_activa") == area:
-        return  # Pulsar el área ya activa no descarta los avances.
+    actual = st.session_state.get("area_activa")
+    if actual == area:
+        return  # Pulsar el área ya activa no descarta avances.
+    archivos, campos = progreso_pendiente_cambio_area(st.session_state)
+    if actual and (archivos or campos):
+        st.session_state["cambio_area_pendiente"] = {
+            "destino": area, "archivos": archivos, "campos": campos,
+        }
+        return
     reiniciar_trabajo_por_cambio_area()
     st.session_state["area_activa"] = area
+
+
+def _cancelar_cambio_area():
+    st.session_state.pop("cambio_area_pendiente", None)
+
+
+@st.dialog("Confirmar cambio de área", on_dismiss=_cancelar_cambio_area)
+def modal_confirmar_cambio_area():
+    cambio = st.session_state.get("cambio_area_pendiente")
+    if not cambio:
+        return
+    if cambio["archivos"]:
+        st.warning("Tienes archivos adjuntados.")
+    if cambio["campos"]:
+        st.warning("Tienes campos seleccionados o completados.")
+    st.write("¿Seguro que quieres cambiar de área? Se borrará el progreso si continúas.")
+    st.markdown("""<style>
+        .st-key-confirmar_cambio_area button {
+            background: #1677c8 !important; border-color: #1677c8 !important;
+            color: white !important;
+        }
+        .st-key-cancelar_cambio_area button {
+            background: #c62828 !important; border-color: #c62828 !important;
+            color: white !important;
+        }
+    </style>""", unsafe_allow_html=True)
+    col_continuar, col_cancelar = st.columns(2)
+    with col_continuar:
+        if st.button("Continuar", type="primary", use_container_width=True,
+                     key="confirmar_cambio_area"):
+            destino = cambio["destino"]
+            _cancelar_cambio_area()
+            reiniciar_trabajo_por_cambio_area()
+            st.session_state["area_activa"] = destino
+            st.rerun()
+    with col_cancelar:
+        if st.button("Cancelar", use_container_width=True,
+                     key="cancelar_cambio_area"):
+            _cancelar_cambio_area()
+            st.rerun()
 
 
 # Botón flotante: dos pulsaciones, 3 segundos de giro para confirmar;
@@ -3372,8 +3784,65 @@ def mostrar_reinicio_flotante():
         _reinicio_flotante_rapido()
 
 
+def _tabla_trazabilidad(tipo, limite, desplazamiento=0):
+    """Trae solo la página visible, en orden cronológico inverso."""
+    if tipo == "modificaciones":
+        filas = gp.historial(DB_PATH, limite=limite, desplazamiento=desplazamiento)
+        columnas = ["Fecha", "Usuario", "Recurso", "Acción", "Revisión", "Archivo"]
+    else:
+        filas = gp.historial_actividad(DB_PATH, limite=limite, desplazamiento=desplazamiento)
+        columnas = ["Fecha", "Usuario", "Actividad", "Detalle"]
+    tabla = pd.DataFrame(filas, columns=columnas)
+    if not tabla.empty:
+        tabla["Fecha"] = tabla["Fecha"].map(gp.mostrar_fecha)
+        if tipo == "modificaciones":
+            tabla["Recurso"] = tabla["Recurso"].map(etiqueta_recurso)
+    return tabla
+
+
+def _cerrar_trazabilidad_por_x():
+    st.session_state.pop("trazabilidad_pantalla_completa", None)
+
+
+@st.dialog("Trazabilidad — pantalla completa", width="large", on_dismiss=_cerrar_trazabilidad_por_x)
+def modal_trazabilidad_completa():
+    tipo = st.session_state.get("trazabilidad_pantalla_completa")
+    if tipo not in ("modificaciones", "actividad"):
+        return
+    st.subheader("Historial de modificaciones" if tipo == "modificaciones"
+                 else "Actividad de usuarios", anchor=False)
+    total = gp.total_historial(DB_PATH) if tipo == "modificaciones" else gp.total_historial_actividad(DB_PATH)
+    cantidad_paginas = max(1, (total + 9) // 10)
+    clave = f"traza_pagina_{tipo}"
+    pagina = max(1, min(int(st.session_state.get(clave, 1)), cantidad_paginas))
+    st.session_state[clave] = pagina
+    tabla = _tabla_trazabilidad(tipo, 10, (pagina - 1) * 10)
+    if not tabla.empty:
+        st.dataframe(tabla, hide_index=True, use_container_width=True, height=420)
+    else:
+        st.info("No existen registros en este historial.")
+    # Páginas debajo de los registros; cambiar de página solo actualiza el modal.
+    izquierda, medio, derecha = st.columns([1, 2, 1])
+    with izquierda:
+        if st.button("Anterior", key=f"traza_anterior_{tipo}",
+                     disabled=pagina <= 1, use_container_width=True):
+            st.session_state[clave] = pagina - 1
+            st.rerun(scope="fragment")
+    with medio:
+        st.markdown(f"<p style='text-align:center'>Página <b>{pagina}</b> de <b>{cantidad_paginas}</b> · {total} registros</p>",
+                    unsafe_allow_html=True)
+    with derecha:
+        if st.button("Siguiente", key=f"traza_siguiente_{tipo}",
+                     disabled=pagina >= cantidad_paginas, use_container_width=True):
+            st.session_state[clave] = pagina + 1
+            st.rerun(scope="fragment")
+    if st.button("Cerrar", key=f"traza_cerrar_{tipo}"):
+        st.session_state.pop("trazabilidad_pantalla_completa", None)
+        st.rerun()
+
+
 # --- ADMINISTRACIÓN DE USUARIOS DESDE ACCESO ---
-@st.dialog("Administración de usuarios", on_dismiss=_cerrar_administracion_por_x)
+@st.dialog("Administración de usuarios", width="large", on_dismiss=_cerrar_administracion_por_x)
 def modal_administracion_usuarios():
     actor = st.session_state.get("usuario_acceso")
     if not gp.es_administrador(DB_PATH, actor):
@@ -3396,6 +3865,7 @@ def modal_administracion_usuarios():
     except PermissionError as exc:
         st.error(str(exc))
         return
+    # Tabla a ancho completo del modal para que se vean sus cinco encabezados.
     if cuentas:
         vista = pd.DataFrame([{
             "Usuario": c["usuario"], "Nombre visible": c["nombre_visible"],
@@ -3403,7 +3873,16 @@ def modal_administracion_usuarios():
             "Estado": "Activo" if c["activo"] else "Inactivo",
             "Creado": gp.mostrar_fecha(c["creado_en"]),
         } for c in cuentas])
-        st.dataframe(vista, use_container_width=True, hide_index=True)
+        st.dataframe(
+            vista, use_container_width=True, hide_index=True,
+            column_config={
+                "Usuario": st.column_config.TextColumn("Usuario", width=115),
+                "Nombre visible": st.column_config.TextColumn("Nombre visible", width=235),
+                "Rol": st.column_config.TextColumn("Rol", width=135),
+                "Estado": st.column_config.TextColumn("Estado", width=110),
+                "Creado": st.column_config.TextColumn("Creado", width=170),
+            },
+        )
     st.caption("Las contraseñas no se pueden consultar. Solo se pueden restablecer.")
 
     def confirmar_operacion(operacion, objetivo, **parametros):
@@ -3426,80 +3905,104 @@ def modal_administracion_usuarios():
             st.error(f"No se modificó la cuenta: {exc}")
 
     tab_crear, tab_editar, tab_clave, tab_estado = st.tabs(
-        ["Crear usuario", "Editar usuario", "Contraseña", "Activar/desactivar"])
+        ["Crear usuario", "Editar usuario", "Editar contraseña", "Activar/desactivar"])
     roles = {"Encargado": "encargado", "Administrador": "administrador"}
     with tab_crear:
-        with st.form("admin_crear_usuario"):
-            usuario_nuevo = st.text_input("Usuario de acceso", key="admin_nuevo_acceso")
-            nombre_nuevo = st.text_input("Nombre visible", key="admin_nuevo_nombre")
-            rol_nuevo = st.selectbox("Rol (opcional, por defecto Encargado)", list(roles),
-                                    index=None, placeholder="Selecciona un rol", key="admin_nuevo_rol")
-            clave_nueva = st.text_input("Contraseña (mínimo 12 caracteres)", type="password", key="admin_nueva_clave")
-            repite_nueva = st.text_input("Repetir contraseña", type="password", key="admin_repite_nueva")
-            aceptar_nuevo = st.checkbox("Confirmo la creación de esta cuenta.", key="admin_crear_ok")
-            guardar_nuevo = st.form_submit_button("Crear usuario", type="primary")
-        if guardar_nuevo:
-            if not aceptar_nuevo:
-                st.error("Marca la casilla de confirmación.")
-            elif clave_nueva != repite_nueva:
-                st.error("Las contraseñas no coinciden.")
-            else:
-                confirmar_operacion("crear", usuario_nuevo, nombre_visible=nombre_nuevo,
-                                    rol=roles.get(rol_nuevo, "encargado"), clave=clave_nueva)
+        _margen_crear_izq, contenido_crear, _margen_crear_der = st.columns([0.13, 0.74, 0.13], gap="small")
+        with contenido_crear:
+            with st.form("admin_crear_usuario"):
+                col1, col2 = st.columns(2, gap="medium")
+                with col1:
+                    usuario_nuevo = st.text_input("Usuario de acceso", key="admin_nuevo_acceso")
+                with col2:
+                    nombre_nuevo = st.text_input("Nombre visible", key="admin_nuevo_nombre")
+                col3, col4 = st.columns(2, gap="medium")
+                with col3:
+                    clave_nueva = st.text_input("Contraseña (mínimo 12 caracteres)", type="password", key="admin_nueva_clave")
+                with col4:
+                    repite_nueva = st.text_input("Repetir contraseña", type="password", key="admin_repite_nueva")
+                rol_nuevo = st.selectbox("Rol (opcional, por defecto Encargado)", list(roles),
+                                        index=None, placeholder="Selecciona un rol", key="admin_nuevo_rol")
+                aceptar_nuevo = st.checkbox("Confirmo la creación de esta cuenta.", key="admin_crear_ok")
+                guardar_nuevo = st.form_submit_button("Crear usuario", type="primary")
+            if guardar_nuevo:
+                if not aceptar_nuevo:
+                    st.error("Marca la casilla de confirmación.")
+                elif clave_nueva != repite_nueva:
+                    st.error("Las contraseñas no coinciden.")
+                else:
+                    confirmar_operacion("crear", usuario_nuevo, nombre_visible=nombre_nuevo,
+                                        rol=roles.get(rol_nuevo, "encargado"), clave=clave_nueva)
 
     nombres = [x["usuario"] for x in cuentas]
     detalle = {x["usuario"]: x for x in cuentas}
     with tab_editar:
-        sel_editar = st.selectbox("Cuenta que deseas editar", nombres,
-                                 index=None, placeholder="Selecciona un usuario", key="admin_sel_editar")
-        if sel_editar:
-            actual = detalle[sel_editar]
-            with st.form(f"admin_editar_{sel_editar}"):
-                nombre_editado = st.text_input("Nombre visible", value=actual["nombre_visible"])
-                st.caption(f"Rol actual: {'Administrador' if actual['rol'] == 'administrador' else 'Encargado'}")
-                rol_editado = st.selectbox("Cambiar rol (opcional)", list(roles),
-                    index=None, placeholder="Selecciona un rol")
-                aceptar_editar = st.checkbox("Confirmo los cambios de esta cuenta.")
-                guardar_editar = st.form_submit_button("Guardar cambios", type="primary")
-            if guardar_editar:
-                if aceptar_editar:
-                    confirmar_operacion("editar", sel_editar, nombre_visible=nombre_editado,
-                                        rol=roles.get(rol_editado, actual["rol"]))
-                else:
-                    st.error("Marca la casilla de confirmación.")
+        _margen_editar_izq, contenido_editar, _margen_editar_der = st.columns([0.13, 0.74, 0.13], gap="small")
+        with contenido_editar:
+            sel_editar = st.selectbox("Cuenta que deseas editar", nombres,
+                                     index=None, placeholder="Selecciona un usuario", key="admin_sel_editar")
+            if sel_editar:
+                actual = detalle[sel_editar]
+                st.warning("Si cambias el nombre de acceso, las sesiones abiertas de esa cuenta dejarán de ser válidas. Deberá iniciar sesión con el nuevo usuario.")
+                with st.form(f"admin_editar_{sel_editar}"):
+                    col1, col2 = st.columns(2, gap="medium")
+                    with col1:
+                        usuario_editado = st.text_input("Usuario de acceso", value=actual["usuario"])
+                    with col2:
+                        nombre_editado = st.text_input("Nombre visible", value=actual["nombre_visible"])
+                    st.caption(f"Rol actual: {'Administrador' if actual['rol'] == 'administrador' else 'Encargado'}")
+                    rol_editado = st.selectbox("Cambiar rol (opcional)", list(roles),
+                        index=None, placeholder="Selecciona un rol")
+                    aceptar_editar = st.checkbox("Confirmo los cambios de esta cuenta.")
+                    guardar_editar = st.form_submit_button("Guardar cambios", type="primary")
+                if guardar_editar:
+                    if aceptar_editar:
+                        confirmar_operacion("editar", sel_editar, nombre_visible=nombre_editado,
+                                            rol=roles.get(rol_editado, actual["rol"]),
+                                            nuevo_usuario=usuario_editado)
+                    else:
+                        st.error("Marca la casilla de confirmación.")
 
     with tab_clave:
-        sel_clave = st.selectbox("Cuenta cuya contraseña deseas restablecer", nombres,
-                                index=None, placeholder="Selecciona un usuario", key="admin_sel_clave")
-        if sel_clave:
-            with st.form(f"admin_clave_{sel_clave}"):
-                clave1 = st.text_input("Nueva contraseña (mínimo 12 caracteres)", type="password")
-                clave2 = st.text_input("Repetir nueva contraseña", type="password")
-                aceptar_clave = st.checkbox("Confirmo el restablecimiento de la contraseña.")
-                cambiar_clave = st.form_submit_button("Restablecer contraseña", type="primary")
-            if cambiar_clave:
-                if not aceptar_clave:
-                    st.error("Marca la casilla de confirmación.")
-                elif clave1 != clave2:
-                    st.error("Las contraseñas no coinciden.")
-                else:
-                    confirmar_operacion("clave", sel_clave, clave=clave1)
+        _margen_clave_izq, contenido_clave, _margen_clave_der = st.columns([0.13, 0.74, 0.13], gap="small")
+        with contenido_clave:
+            sel_clave = st.selectbox("Cuenta cuya contraseña deseas restablecer", nombres,
+                                    index=None, placeholder="Selecciona un usuario", key="admin_sel_clave")
+            if sel_clave:
+                st.warning("Al cambiar la contraseña se cerrarán las sesiones actuales de esta cuenta. Será necesario volver a iniciar sesión.")
+                with st.form(f"admin_clave_{sel_clave}"):
+                    col1, col2 = st.columns(2, gap="medium")
+                    with col1:
+                        clave1 = st.text_input("Nueva contraseña (mínimo 12 caracteres)", type="password")
+                    with col2:
+                        clave2 = st.text_input("Repetir nueva contraseña", type="password")
+                    aceptar_clave = st.checkbox("Confirmo el restablecimiento de la contraseña.")
+                    cambiar_clave = st.form_submit_button("Restablecer contraseña", type="primary")
+                if cambiar_clave:
+                    if not aceptar_clave:
+                        st.error("Marca la casilla de confirmación.")
+                    elif clave1 != clave2:
+                        st.error("Las contraseñas no coinciden.")
+                    else:
+                        confirmar_operacion("clave", sel_clave, clave=clave1)
 
     with tab_estado:
-        sel_estado = st.selectbox("Cuenta que deseas activar o desactivar", nombres,
-                                 index=None, placeholder="Selecciona un usuario", key="admin_sel_estado")
-        if sel_estado:
-            c = detalle[sel_estado]
-            texto = "Desactivar" if c["activo"] else "Activar"
-            st.info(f"Estado actual: {'Activo' if c['activo'] else 'Inactivo'}")
-            with st.form(f"admin_estado_{sel_estado}"):
-                aceptar_estado = st.checkbox(f"Confirmo que deseo {texto.lower()} la cuenta {sel_estado}.")
-                ejecutar_estado = st.form_submit_button(f"{texto} usuario", type="primary")
-            if ejecutar_estado:
-                if aceptar_estado:
-                    confirmar_operacion("estado", sel_estado, activo=not bool(c["activo"]))
-                else:
-                    st.error("Marca la casilla de confirmación.")
+        _margen_estado_izq, contenido_estado, _margen_estado_der = st.columns([0.13, 0.74, 0.13], gap="small")
+        with contenido_estado:
+            sel_estado = st.selectbox("Cuenta que deseas activar o desactivar", nombres,
+                                     index=None, placeholder="Selecciona un usuario", key="admin_sel_estado")
+            if sel_estado:
+                c = detalle[sel_estado]
+                texto = "Desactivar" if c["activo"] else "Activar"
+                st.info(f"Estado actual: {'Activo' if c['activo'] else 'Inactivo'}")
+                with st.form(f"admin_estado_{sel_estado}"):
+                    aceptar_estado = st.checkbox(f"Confirmo que deseo {texto.lower()} la cuenta {sel_estado}.")
+                    ejecutar_estado = st.form_submit_button(f"{texto} usuario", type="primary")
+                if ejecutar_estado:
+                    if aceptar_estado:
+                        confirmar_operacion("estado", sel_estado, activo=not bool(c["activo"]))
+                    else:
+                        st.error("Marca la casilla de confirmación.")
     if st.button("Cerrar administración", key="admin_cerrar_modal"):
         st.session_state["modal_admin_usuarios_abierto"] = False
         st.session_state.pop("revision_admin_usuarios", None)
@@ -3509,7 +4012,11 @@ def modal_administracion_usuarios():
 # --- GESTOR DE DIÁLOGOS EMERGENTES ---
 def ejecutar_gestor_dialogos():
     """Ejecuta como máximo UN solo diálogo emergente por ciclo para evitar errores de Streamlit."""
-    if st.session_state.get("modal_admin_usuarios_abierto"):
+    if st.session_state.get("trazabilidad_pantalla_completa"):
+        modal_trazabilidad_completa()
+    elif st.session_state.get("cambio_area_pendiente"):
+        modal_confirmar_cambio_area()
+    elif st.session_state.get("modal_admin_usuarios_abierto"):
         modal_administracion_usuarios()
     elif st.session_state.get("cambio_pendiente"):
         modal_confirmar_cambio_compartido()
@@ -3589,7 +4096,6 @@ def _fuentes_para_referencias(pdfs_activos, modo_conjunto, indice_actual, examen
     todas = list(pdf_fuentes)
     id_origen = {
         "Normas Generales de Toma de Muestras": "normas_generales",
-        "Manual de toma de muestras": "manual_toma_muestras",
         "Cartera de Exámenes del CRS · Indicaciones": "cartera_examenes",
     }
     ids = set()
@@ -3627,12 +4133,57 @@ def _fuentes_para_referencias(pdfs_activos, modo_conjunto, indice_actual, examen
         if cache and cache[0] == metadatos["sha256"]:
             fuente = cache[1]
         else:
-            if fuente_id == "manual_toma_muestras":
-                metadatos = fd.documento_fuente(DB_PATH, fuente_id, incluir_archivo=True)
             fuente = apa.fuente_institucional(fuente_id, metadatos)
             cache_fuentes[fuente_id] = (metadatos["sha256"], fuente)
         todas.append(fuente)
     return pdf_fuentes, todas
+
+
+def _limpiar_examen_para_siguiente_pdf():
+    """Limpia solo el examen actual, sin perder las fichas ya consolidadas."""
+    st.session_state["examen_activo"] = None
+    st.session_state["acreditacion_manual_id"] = None
+    st.session_state["_acreditacion_reset_pendiente"] = True
+    st.session_state["cartera_examen_emparejado"] = "Sin vincular"
+    st.session_state["_sel_cartera_pendiente"] = None
+    for clave in (
+        "candidatos_cartera_pendientes", "data_extracted", "user_edited_fields",
+        "extracted_text", "contexto_emparejamiento_cartera",
+        "omitir_emparejamiento_examen", "modo_referencia_aplicado",
+        "seleccion_campos_excel", "excel_para_actualizar",
+        "historial_edicion_tabla", "campos_restaurados_tabla", "marca_historial_consumida",
+    ):
+        st.session_state.pop(clave, None)
+    st.session_state["aggrid_key_counter"] = st.session_state.get("aggrid_key_counter", 0) + 1
+    st.session_state["mostrar_modal_examenes"] = False
+    st.session_state.pop("modal_area_activa", None)
+
+
+def _omitir_pdf_actual(indice, total, nombre):
+    """Omitir no extrae, no altera result_bytes y no guarda en SQLite."""
+    cf.omitir_documento(st.session_state, indice, total, nombre)
+    _limpiar_examen_para_siguiente_pdf()
+
+
+def _aplicar_historial_tabla(accion, actualizar_grid=True):
+    """Restaura valores en la sesión y los fuerza también en el Excel.
+
+    El botón reconstruye la tabla (un rerun habitual de Streamlit). Ctrl+Z
+    restaura visualmente las celdas en AG Grid y solo sincroniza el backend:
+    no incrementa la clave ni fuerza un segundo st.rerun completo.
+    """
+    historial = st.session_state.get("historial_edicion_tabla", {})
+    datos = st.session_state.get("data_extracted")
+    if datos is None:
+        return False
+    editados = st.session_state.setdefault("user_edited_fields", set())
+    campos = ht.aplicar_accion(historial, datos, editados, accion)
+    if not campos:
+        return False
+    st.session_state.setdefault("campos_restaurados_tabla", set()).update(campos)
+    if actualizar_grid:
+        st.session_state["aggrid_key_counter"] = st.session_state.get("aggrid_key_counter", 0) + 1
+    return True
 
 
 # --- SIDEBAR ---
@@ -3655,8 +4206,7 @@ with st.sidebar:
         else:
             st.caption("La administración de cuentas está disponible solo para administradores.")
     st.divider()
-    st.header("Áreas del laboratorio")
-    st.caption("Selecciona un área para trabajar. Al cambiar de área se limpiarán todas las selecciones, incluyendo documentos.")
+    st.header("Áreas del laboratorio", anchor=False)
     for area in AREA_CONFIG:
         st.button(
             area,
@@ -3668,11 +4218,24 @@ with st.sidebar:
         )
     st.divider()
     st.markdown(f"**Área activa:** {st.session_state.get('area_activa') or 'Sin seleccionar'}")
-    st.markdown(f"**Examen activo:** {st.session_state.get('examen_activo') or 'Sin seleccionar'}")
+    examen_en_uso = st.session_state.get("examen_activo")
+    if examen_en_uso:
+        st.markdown(
+            '<div class="sidebar-examen-activo">'
+            '<strong>Examen activo:</strong> '
+            f'<span>{html.escape(str(examen_en_uso))}</span></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div class="sidebar-examen-sin-seleccionar">'
+            '<strong>Examen activo:</strong> <span>Sin seleccionar</span></div>',
+            unsafe_allow_html=True,
+        )
     st.divider()
 
     # --- SECCIÓN BASE DE DATOS (SQLITE) SIN EMOJIS ---
-    st.header("Base de datos (SQLite)")
+    st.header("Base de datos", anchor=False)
 
     # Áreas del laboratorio almacenadas en SQLite (mantener el orden de AREA_CONFIG)
     for area_item in AREA_CONFIG:
@@ -3687,13 +4250,11 @@ with st.sidebar:
                 st.caption("Documento de origen: no registrado en esta versión anterior de la base de datos.")
 
             if b_bytes_area:
-                ZONA_HORARIA = ZoneInfo("America/Santiago")
-                fecha_sb = datetime.now(ZONA_HORARIA).strftime("%d-%m-%Y")
-                area_clean_sb = area_item.replace(" ", "_")
                 st.download_button(
                     f"Descargar ficha técnica ({area_item})",
                     data=b_bytes_area,
-                    file_name=nombre_plantilla or f"Ficha_Técnica_Actualizada_{area_clean_sb}_{fecha_sb}.xlsx",
+                    file_name=nombre_descarga_excel_generado(
+                        nombre_plantilla, area=area_item, fecha_registro=fecha_act_area),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                     key=f"dl_area_btn_{area_item}", on_click="ignore"
@@ -3701,9 +4262,6 @@ with st.sidebar:
             else:
                 st.info("No hay Ficha Técnica/Plantilla registrada en la base de datos para esta área.")
 
-            if area_item == "Hematología y coagulación":
-                st.caption("Al cargar la plantilla reconstruida se conservarán las fichas "
-                           "ya completadas y los exámenes adicionales de SQLite.")
             area_file = st.file_uploader(f"Cargar nueva plantilla de {area_item} (.xlsx)", type=["xlsx"], key=f"uploader_area_{area_item}")
             if area_file is not None:
                 if st.button(f"Guardar {area_item} en Base de Datos", type="primary", use_container_width=True, key=f"btn_save_area_{area_item}"):
@@ -3754,7 +4312,7 @@ with st.sidebar:
                                else obtener_cartera_excel_bytes())
             if b_bytes_cartera:
                 ZONA_HORARIA = ZoneInfo("America/Santiago")
-                fecha_cartera_dl = datetime.now(ZONA_HORARIA).strftime("%d-%m-%Y")
+                fecha_cartera_dl = fecha_hoy_nombre_archivo()
                 st.download_button(
                     "Descargar cartera de exámenes",
                     data=b_bytes_cartera,
@@ -3775,78 +4333,54 @@ with st.sidebar:
                                     descripcion="Reemplazar la Cartera de exámenes y su documento original")
 
 
-    # Manual y Normas generales: fuentes independientes bajo un solo apartado.
-    # Las pestañas mantienen el orden alfabético (Manual, Normas generales).
-    with st.expander("Manual de toma de muestras", expanded=False):
-        tab_manual, tab_normas = st.tabs(["Manual", "Normas generales"])
-
-        with tab_manual:
-            meta_manual = fd.documento_fuente(DB_PATH, fd.MANUAL_ID, incluir_archivo=True)
-            if meta_manual:
-                st.caption(f"Última actualización: **{formatear_fecha_fuente(meta_manual['fecha_actualizacion'])}**")
-                st.caption(f"Modificado por: **{gp.estado_recurso(DB_PATH, 'fuente:manual_toma_muestras')['usuario']}**")
-                st.caption(f"Documento almacenado: **{meta_manual['nombre_archivo']}** · 2 campos predeterminados")
-                st.download_button(
-                    "Descargar manual de toma de muestras original",
-                    data=meta_manual["archivo"], file_name=meta_manual["nombre_archivo"],
-                    mime=meta_manual["tipo_mime"], use_container_width=True,
-                    key="descargar_manual_toma_original", on_click="ignore")
-            else:
-                st.warning("No está cargado el Manual de toma de muestras.")
-            nuevo_manual = st.file_uploader(
-                "Cargar nuevo Manual de toma de muestras (.pdf)", type=["pdf"],
-                key="actualizar_manual_toma_archivo")
-            if nuevo_manual is not None and st.button(
-                    "Guardar nuevo Manual en SQLite", key="guardar_manual_toma_nuevo",
-                    type="primary", use_container_width=True):
-                solicitar_cambio("manual", "fuente:manual_toma_muestras",
-                                archivo=nuevo_manual.getvalue(), nombre_archivo=nuevo_manual.name,
-                                descripcion="Reemplazar el Manual de toma de muestras y sus dos campos")
-
-        with tab_normas:
-            meta_normas = fd.documento_fuente(DB_PATH, fd.NORMAS_ID, incluir_archivo=True)
-            if meta_normas:
-                st.caption(f"Última actualización: **{formatear_fecha_fuente(meta_normas['fecha_actualizacion'])}**")
-                st.caption(f"Modificado por: **{gp.estado_recurso(DB_PATH, 'fuente:normas_generales')['usuario']}**")
-                st.caption(f"Documento almacenado: **{meta_normas['nombre_archivo']}** · 4 campos predeterminados")
-                st.download_button(
-                    "Descargar documento original de normas",
-                    data=meta_normas["archivo"],
-                    file_name=meta_normas["nombre_archivo"],
-                    mime=meta_normas["tipo_mime"],
-                    use_container_width=True, key="descargar_normas_original", on_click="ignore")
-            else:
-                st.warning("No están cargadas las normas generales.")
-            nuevo_normas = st.file_uploader(
-                "Cargar nuevas Normas Generales (.docx o .pdf)", type=["docx", "pdf"],
-                key="actualizar_normas_archivo")
-            if nuevo_normas is not None and st.button(
-                    "Guardar nuevas Normas en SQLite", key="guardar_normas_nuevas",
-                    type="primary", use_container_width=True):
-                solicitar_cambio("normas", "fuente:normas_generales",
-                                archivo=nuevo_normas.getvalue(), nombre_archivo=nuevo_normas.name,
-                                descripcion="Reemplazar las Normas generales y sus cuatro campos")
+    # Normas generales permanece independiente y disponible para reemplazo.
+    with st.expander("Normas generales de toma de muestras", expanded=False):
+        meta_normas = fd.documento_fuente(DB_PATH, fd.NORMAS_ID, incluir_archivo=True)
+        if meta_normas:
+            st.caption(f"Última actualización: **{formatear_fecha_fuente(meta_normas['fecha_actualizacion'])}**")
+            st.caption(f"Modificado por: **{gp.estado_recurso(DB_PATH, 'fuente:normas_generales')['usuario']}**")
+            st.caption(f"Documento almacenado: **{meta_normas['nombre_archivo']}** · 4 campos predeterminados")
+            st.download_button(
+                "Descargar documento original de normas",
+                data=meta_normas["archivo"],
+                file_name=meta_normas["nombre_archivo"],
+                mime=meta_normas["tipo_mime"],
+                use_container_width=True, key="descargar_normas_original", on_click="ignore")
+        else:
+            st.warning("No están cargadas las normas generales.")
+        nuevo_normas = st.file_uploader(
+            "Cargar nuevas Normas Generales (.docx o .pdf)", type=["docx", "pdf"],
+            key="actualizar_normas_archivo")
+        if nuevo_normas is not None and st.button(
+                "Guardar nuevas Normas en SQLite", key="guardar_normas_nuevas",
+                type="primary", use_container_width=True):
+            solicitar_cambio("normas", "fuente:normas_generales",
+                            archivo=nuevo_normas.getvalue(), nombre_archivo=nuevo_normas.name,
+                            descripcion="Reemplazar las Normas generales y sus cuatro campos")
 
     st.divider()
-    st.header("Trazabilidad")
+    st.header("Trazabilidad", anchor=False)
     with st.expander("Historial de modificaciones", expanded=False):
-        st.caption("Cambios confirmados en SQLite, ordenados del más reciente al más antiguo.")
-        filas_historial = gp.historial(DB_PATH, limite=30)
-        if filas_historial:
-            historico = pd.DataFrame(filas_historial,
-                columns=["Fecha", "Usuario", "Recurso", "Acción", "Revisión", "Archivo"])
-            historico["Fecha"] = historico["Fecha"].map(gp.mostrar_fecha)
-            historico["Recurso"] = historico["Recurso"].map(etiqueta_recurso)
-            st.dataframe(historico, hide_index=True, use_container_width=True)
+        tabla = _tabla_trazabilidad("modificaciones", 5)
+        if not tabla.empty:
+            with st.container(key="traza_previa_modificaciones"):
+                st.dataframe(tabla, hide_index=True, use_container_width=True)
+            if st.button("⛶ Fullscreen", key="traza_full_modificaciones", use_container_width=True):
+                st.session_state["trazabilidad_pantalla_completa"] = "modificaciones"
+                st.session_state["traza_pagina_modificaciones"] = 1
+                st.rerun()
         else:
             st.info("Aún no hay modificaciones confirmadas registradas.")
 
     with st.expander("Actividad de usuarios", expanded=False):
-        actividad = gp.historial_actividad(DB_PATH, limite=25)
-        if actividad:
-            tabla_actividad = pd.DataFrame(actividad, columns=["Fecha", "Usuario", "Actividad", "Detalle"])
-            tabla_actividad["Fecha"] = tabla_actividad["Fecha"].map(gp.mostrar_fecha)
-            st.dataframe(tabla_actividad, hide_index=True, use_container_width=True)
+        tabla = _tabla_trazabilidad("actividad", 5)
+        if not tabla.empty:
+            with st.container(key="traza_previa_actividad"):
+                st.dataframe(tabla, hide_index=True, use_container_width=True)
+            if st.button("⛶ Fullscreen", key="traza_full_actividad", use_container_width=True):
+                st.session_state["trazabilidad_pantalla_completa"] = "actividad"
+                st.session_state["traza_pagina_actividad"] = 1
+                st.rerun()
         else:
             st.info("No hay actividad registrada.")
 
@@ -3882,7 +4416,7 @@ if st.session_state.get("area_activa") is None:
         2. **Administra y selecciona el examen** que deseas procesar usando el botón **Administrar exámenes**.
         3. **Carga las fichas técnicas en PDF** (lote de hasta 5 documentos simultáneos) y organiza la cola de procesamiento si lo deseas.
         4. **Define los parámetros operacionales** (*Laboratorio de procesamiento, Actualizado por, Autorizado por*) y verifica el emparejamiento con la Cartera en SQLite.
-        5. **Haz clic en "Analizar documento activo"** para realizar la extracción automática de texto, OCR y cruce con la Base Maestra de Cartera.
+        5. **Haz clic en "Analizar documento"** para realizar la extracción automática de texto, OCR y cruce con la Base Maestra de Cartera.
         6. **Revisa y edita la información** en la tabla interactiva, resuelve discrepancias si existen, y actualiza la planilla del área o descarga el Excel consolidado.
         """
     )
@@ -3947,6 +4481,9 @@ else:
         if st.session_state.get("modo_pdf_anterior") != modo_procesamiento:
             st.session_state["modo_pdf_anterior"] = modo_procesamiento
             st.session_state["cola_pdf_indice"] = 0
+            for clave in ("cola_pdf_omitidos", "cola_pdf_procesados", "cola_pdf_finalizada_omision",
+                          "historial_edicion_tabla", "campos_restaurados_tabla"):
+                st.session_state.pop(clave, None)
             for clave in ("data_extracted", "result_bytes", "extracted_text", "user_edited_fields", "discrepancias_pdf", "fuentes_pdf", "modal_pdf_pdf_abierto", "modal_discrepancias_unificado"):
                 st.session_state.pop(clave, None)
 
@@ -3966,7 +4503,81 @@ else:
         if exceso_archivos:
             st.error(f"Has seleccionado **{len(pdfs)} archivos**. El límite máximo simultáneo es de **{MAX_PDFS_PERMITIDOS} documentos PDF** para evitar saturar el sistema.")
 
-        if pdfs and not exceso_archivos:
+        if (pdfs and not exceso_archivos
+                and st.session_state.get("cola_pdf_finalizada_omision")
+                and len(pdfs) > 1
+                and set(st.session_state.get("orden_nombres_pdf", [])) == {p.name for p in pdfs}):
+            # No volver al último PDF: fue omitido expresamente. La descarga y
+            # la actualización deben seguir disponibles si hubo extracciones.
+            total_pdfs_cola = len(pdfs)
+            resumen = cf.resumen_cola(st.session_state, total_pdfs_cola)
+            st.success(
+                f"¡Has completado la cola! {len(resumen['procesados'])} documento(s) "
+                f"procesado(s) y {len(resumen['omitidos'])} omitido(s)."
+            )
+            if resumen["omitidos"]:
+                st.caption("Omitidos sin cambios: " + ", ".join(resumen["omitidos"]))
+            if resumen["puede_guardar"]:
+                # Centrar únicamente este encabezado; conservar el estilo nativo
+                # del subheader y no afectar otros títulos de la aplicación.
+                st.html("<style>.st-key-titulo_guardado_omision [data-testid='stHeadingWithActionElements'] { justify-content: center; width: 100%; } .st-key-titulo_guardado_omision h3 { text-align: center; width: 100%; }</style>")
+                with st.container(key="titulo_guardado_omision"):
+                    st.subheader("Guardar avances de la cola", anchor=False)
+                # Centrar el aviso sobre la franja que ocupan los dos botones,
+                # conservando el estilo azul original de st.info.
+                st.html("<style>.st-key-aviso_guardado_omision [data-testid='stAlert'] p { text-align: center; }</style>")
+                _, col_aviso_guardado, _ = st.columns([1, 4, 1], gap="small")
+                with col_aviso_guardado:
+                    with st.container(key="aviso_guardado_omision"):
+                        st.info("Los exámenes procesados siguen en la ficha consolidada. Omitir un PDF no altera ni borra los avances anteriores.")
+                try:
+                    excel_final = validar_excel_para_descarga(st.session_state["result_bytes"])
+                except ValueError as error_excel:
+                    excel_final = None
+                    st.error(f"No se pudo validar el Excel consolidado: {error_excel}")
+                # En el guardado habitual cada botón ocupa una de tres columnas.
+                # Reservamos medio ancho de columna en cada extremo para
+                # centrar los dos botones de omisión sin ensancharlos.
+                _, col_final_descarga, col_final_actualiza, _ = st.columns(
+                    [1, 2, 2, 1], gap="small"
+                )
+                with col_final_descarga:
+                    if excel_final is not None:
+                        st.download_button(
+                            "Descargar Excel consolidado (.xlsx)",
+                            data=excel_final,
+                            file_name=nombre_ficha_tecnica(
+                                area_activa, st.session_state.get("fecha_ultima_extraccion_ficha")),
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            type="secondary", use_container_width=True,
+                            key="descarga_cola_tras_omision", on_click="ignore",
+                        )
+                with col_final_actualiza:
+                    hay_discrepancias = bool(
+                        st.session_state.get("discrepancias_pdf")
+                        or st.session_state.get("conflictos_pendientes")
+                    )
+                    if st.button(
+                        "Actualizar en base de datos", type="primary", use_container_width=True,
+                        key="guardar_cola_tras_omision",
+                        disabled=(excel_final is None or hay_discrepancias),
+                        help=("Deshabilitado por discrepancias sin analizar."
+                              if hay_discrepancias else
+                              "No hay un Excel válido para actualizar."
+                              if excel_final is None else None),
+                    ):
+                        anterior, _ = obtener_plantilla_area_db(area_activa)
+                        st.session_state["excel_para_actualizar"] = excel_final
+                        st.session_state["comparacion_planilla_detalles"] = cf.comparar_libros_completos(
+                            anterior, excel_final)
+                        revision = gp.estado_recurso(DB_PATH, "area:" + area_activa)
+                        st.session_state["revision_plantilla_pendiente"] = revision["revision"]
+                        st.session_state["metadata_plantilla_pendiente"] = revision
+                        st.session_state["modal_confirmar_planilla_abierto"] = True
+            else:
+                st.info("Todos los documentos fueron omitidos. No se creó ninguna ficha nueva para descargar o actualizar.")
+
+        elif pdfs and not exceso_archivos:
             mapa_pdfs = {pdf.name: pdf for pdf in pdfs}
             nombres_actuales = [pdf.name for pdf in pdfs]
 
@@ -3981,6 +4592,9 @@ else:
                         nuevo_orden_filtrado.append(nombre)
                 
                 st.session_state["orden_nombres_pdf"] = nuevo_orden_filtrado
+                for clave in ("cola_pdf_omitidos", "cola_pdf_procesados", "cola_pdf_finalizada_omision",
+                              "historial_edicion_tabla", "campos_restaurados_tabla"):
+                    st.session_state.pop(clave, None)
                 st.session_state["cola_pdf_indice"] = 0
                 st.session_state.pop("data_extracted", None)
                 st.session_state.pop("user_edited_fields", None)
@@ -3988,6 +4602,7 @@ else:
                 st.session_state.pop("result_bytes", None)
                 st.session_state.pop("discrepancias_pdf", None)
                 st.session_state.pop("modo_referencia_aplicado", None)
+                st.session_state.pop("seleccion_campos_excel", None)
 
             hash_archivos = "_".join(sorted(nombres_actuales))
             key_sortable_dinamico = f"sortable_queue_{st.session_state.get('generacion_cargas_area', 0)}_{hash_archivos}"
@@ -4003,7 +4618,7 @@ else:
                         st.markdown(f'<div class="num-slot">{i}.</div>', unsafe_allow_html=True)
 
                 with col_fichas:
-                    st.caption("Documentos (arrastra de arriba a abajo)")
+                    st.caption("Documentos (arrastrar para ordenar)")
                     nuevo_orden_nombres = sort_items(
                         st.session_state["orden_nombres_pdf"],
                         direction="vertical",
@@ -4012,10 +4627,16 @@ else:
 
                 if nuevo_orden_nombres and nuevo_orden_nombres != st.session_state["orden_nombres_pdf"]:
                     st.session_state["orden_nombres_pdf"] = nuevo_orden_nombres
+                    for clave in ("cola_pdf_omitidos", "cola_pdf_procesados", "cola_pdf_finalizada_omision",
+                                  "historial_edicion_tabla", "campos_restaurados_tabla"):
+                        st.session_state.pop(clave, None)
                     st.session_state["cola_pdf_indice"] = 0
                     st.session_state.pop("data_extracted", None)
                     st.session_state.pop("user_edited_fields", None)
                     st.session_state.pop("extracted_text", None)
+                    st.session_state.pop("result_bytes", None)
+                    st.session_state.pop("bytes_plantilla_inicial", None)
+                    st.session_state.pop("fecha_ultima_extraccion_ficha", None)
                     st.rerun()
 
             pdfs_ordenados = [mapa_pdfs[nombre] for nombre in st.session_state["orden_nombres_pdf"] if nombre in mapa_pdfs]
@@ -4040,14 +4661,29 @@ else:
                 """, unsafe_allow_html=True)
     
                 st.progress((idx_actual + 1) / total_pdfs)
-    
+                # La omisión solo existe en colas de varios exámenes; se ofrece
+                # ANTES de analizar, también para el último documento.
+                if total_pdfs > 1 and "data_extracted" not in st.session_state:
+                    etiqueta_omitir = (
+                        "Omitir último examen y finalizar cola"
+                        if idx_actual == total_pdfs - 1 else
+                        "Omitir este examen y pasar al siguiente"
+                    )
+                    if st.button(
+                        etiqueta_omitir, type="secondary", key="btn_omitir_pdf_cola",
+                        help="Este PDF no se analizará ni modificará las fichas ya procesadas.",
+                    ):
+                        _omitir_pdf_actual(idx_actual, total_pdfs, pdf_activo.name)
+                        st.rerun()
+
             st.divider()
 
             # --- EMPAREJAMIENTO INSTITUCIONAL: AMBAS CARTERAS CON EL MISMO FLUJO ---
             st.markdown("##### Emparejamiento con **Cartera de Exámenes del CRS**")
             lista_cartera = obtener_lista_cartera_db()
+            seleccion_manual_cartera = None
             if not lista_cartera:
-                st.warning("La Cartera de Exámenes del CRS no está cargada. Puedes actualizarla en Base de datos (SQLite).")
+                st.warning("La Cartera de Exámenes del CRS no está cargada. Puedes actualizarla en Base de datos.")
             else:
                 # Sincronizar ANTES de instanciar el selectbox. No basta comprobar
                 # si cambió el examen: un estado antiguo puede mantener vacío
@@ -4075,8 +4711,12 @@ else:
                     help="Selecciona un examen de la Cartera o confirma una coincidencia sugerida."
                 )
                 st.session_state["cartera_examen_emparejado"] = seleccion_manual_cartera or "Sin vincular"
-                sugeridas_crs = ([c for c in buscar_top_coincidencias_cartera(examen_activo, area_activa, 8)
-                                 if c[2] >= 0.55][:5] if examen_activo else [])
+                # Buscar las cinco mejores DESPUÉS de aplicar el umbral de
+                # similitud. Si se limita primero, pueden mostrarse solo las
+                # variantes por nombre aunque haya más opciones pertinentes.
+                sugeridas_crs = (buscar_top_coincidencias_cartera(
+                    examen_activo, area_activa, top_n=5, similitud_minima=0.55)
+                    if examen_activo else [])
                 if seleccion_manual_cartera:
                     with sqlite3.connect(DB_PATH) as con:
                         fila_lab = con.execute("SELECT laboratorio FROM cartera_examenes WHERE nombre_examen=?",
@@ -4160,8 +4800,15 @@ else:
                     st.caption(f"Vinculada: **{seleccion_previa['prestacion']}** ({seleccion_previa['area']}) · {detalle_match}")
                 elif examen_activo:
                     st.warning("No hay coincidencia exacta. Selecciona la prestación adecuada para evitar datos de otro examen.")
-                    sugeridas = [c for c in fd.candidatos_acreditacion(DB_PATH, examen_activo, area_activa, 8)
-                                 if c[3] >= 0.55][:5]
+                    # Considerar también el examen que el usuario vinculó
+                    # explícitamente en la Cartera CRS. Su nombre puede ser
+                    # diferente al nombre administrativo del examen activo.
+                    # El vínculo en Acreditación sigue requiriendo confirmación.
+                    sugeridas = fd.candidatos_acreditacion(
+                        DB_PATH, examen_activo, area_activa,
+                        limite=5, similitud_minima=0.55,
+                        nombre_referencia=seleccion_manual_cartera,
+                    )
                     if sugeridas:
                         st.markdown("<u><strong>Posibles coincidencias:</strong></u>", unsafe_allow_html=True)
                         columna_sugerencias, _ = st.columns([1, 1], gap="small")
@@ -4307,7 +4954,7 @@ else:
             st.write("")
             col_btn_analisis, col_sp1 = st.columns([1.5, 2])
             with col_btn_analisis:
-                iniciar_analisis = st.button("Analizar todos los PDF del examen" if modo_conjunto else "Analizar documento activo", type="primary", key="analyze_pdf", disabled=exceso_archivos, use_container_width=False)
+                iniciar_analisis = st.button("Analizar todos los PDF del examen" if modo_conjunto else "Analizar documento", type="primary", key="analyze_pdf", disabled=exceso_archivos, use_container_width=False)
 
             if iniciar_analisis:
                 if not examen_activo:
@@ -4329,6 +4976,8 @@ else:
                         st.session_state.pop("conflictos_pendientes", None)
 
                         st.session_state["aggrid_key_counter"] += 1
+                        if st.session_state.get("examen_resultado") != examen_activo:
+                            st.session_state.pop("seleccion_campos_excel", None)
 
                         aliases_area = get_field_aliases(area_activa)
                         plantilla_bytes_db, _ = obtener_plantilla_area_db(area_activa)
@@ -4373,7 +5022,8 @@ else:
                             st.session_state["fuentes_pdf"] = fuentes
                             st.session_state["discrepancias_pdf"] = diferencias
                         else:
-                            raw_text, _ = extract_pdf_text(pdf_activo.getvalue(), pdf_activo.name, examen_activo)
+                            raw_text, _ = extract_pdf_text(pdf_activo.getvalue(), pdf_activo.name, examen_activo,
+                                                                hematologia=es_alias_hematologia(aliases_area))
                             parsed_pdf_data = infer_name_code(raw_text, parse_labeled_text(raw_text, aliases_area, examen_activo))
                             parsed_pdf_data = {campo: val for campo, val in parsed_pdf_data.items()
                                                if campo not in fd.CAMPOS_CONTROLADOS}
@@ -4417,7 +5067,8 @@ else:
                         st.session_state.pop("fuentes_referencias_aplicadas", None)
 
                         # Preparación: Indicaciones del CRS > Acreditación > Normas.
-                        # Los otros siete campos mantienen sus prioridades institucionales.
+                        # Los otros campos con fuentes mantienen sus prioridades;
+                        # Recepción y Procesamiento permanecen sin origen automático.
                         # Ningún PDF técnico reemplaza estos campos documentales.
                         valores_doc, origen_doc, prestacion_doc, estado_vinculo = fd.obtener_valores_fuentes(
                             DB_PATH, examen_activo, area_activa,
@@ -4456,8 +5107,17 @@ else:
                         out_bytes = aplicar_formato_normas_excel(
                             out_bytes, examen_activo, origen_para_excel)
                         st.session_state["result_bytes"] = out_bytes
+                        # La fecha del nombre corresponde a la extracción exitosa,
+                        # no al día en que se descargue el documento.
+                        st.session_state["fecha_ultima_extraccion_ficha"] = fecha_hoy_nombre_archivo()
                         st.session_state["data_extracted"] = copy.deepcopy(data)
                         st.session_state["user_edited_fields"] = set(ediciones_previas)
+                        st.session_state.pop("historial_edicion_tabla", None)
+                        st.session_state.pop("campos_restaurados_tabla", None)
+                        if not modo_conjunto:
+                            procesados = st.session_state.setdefault("cola_pdf_procesados", [])
+                            if pdf_activo.name not in procesados:
+                                procesados.append(pdf_activo.name)
                         st.session_state["examen_resultado"] = examen_activo
                         st.session_state["extracted_text"] = text
                         st.session_state["area_resultado"] = area_activa
@@ -4472,8 +5132,11 @@ else:
                             # PDF vs Cartera se abre solo por su propio botón,
                             # nunca simultáneamente con PDF vs PDF.
 
+                        # El clic ya inició una ejecución completa. La revisión se
+                        # renderiza justo debajo en esta misma ejecución: forzar
+                        # st.rerun() reconstruía de nuevo la página y podía saltar
+                        # la vista desde el botón hasta el final de la tabla.
                         st.success(f"Se analizaron {total_pdfs} PDF para el examen seleccionado." if modo_conjunto else f"¡Se procesó correctamente el archivo «{pdf_activo.name}»!")
-                        st.rerun()
 
                     except Exception as e:
                         st.error(f"No se pudo analizar el documento: {e}")
@@ -4481,6 +5144,9 @@ else:
             st.session_state.pop("result_bytes", None)
             st.session_state.pop("data_extracted", None)
             st.session_state.pop("orden_nombres_pdf", None)
+            for clave in ("cola_pdf_omitidos", "cola_pdf_procesados", "cola_pdf_finalizada_omision",
+                          "historial_edicion_tabla", "campos_restaurados_tabla"):
+                st.session_state.pop(clave, None)
             st.info("Carga uno o más PDF para comenzar la extracción en cola.")
 
         if "data_extracted" in st.session_state and "result_bytes" in st.session_state and pdfs:
@@ -4537,10 +5203,11 @@ else:
 
             # --- REFERENCIAS APA CON DOS VISTAS PREVIAS, SIN DIÁLOGOS ---
             if "Referencias" in aliases_area:
+                st.subheader("Referencias", anchor=False)
                 # Mantener la identidad del contenedor para conservar el menú
                 # abierto o cerrado tal como lo dejó el usuario al confirmar.
                 with st.container(key="contenedor_referencias"):
-                    with st.expander("Referencias bibliográficas", expanded=False):
+                    with st.expander("Referencias bibliográficas", expanded=True):
                       refs_pdf, refs_todas = _fuentes_para_referencias(
                           pdfs_ordenados_rev, modo_conjunto, st.session_state.get("cola_pdf_indice", 0),
                           examen_activo, data,
@@ -4589,11 +5256,25 @@ else:
                           st.session_state["result_bytes"] = actualizar_campo_excel(
                               st.session_state["result_bytes"], examen_activo, "Referencias", texto_elegido)
                           st.session_state.setdefault("user_edited_fields", set()).discard("Referencias")
+                          st.session_state.pop("historial_edicion_tabla", None)
+                          st.session_state.pop("campos_restaurados_tabla", None)
                           st.session_state["aggrid_key_counter"] += 1
                           st.session_state["modo_referencia_aplicado"] = modo_referencia
                           st.rerun()
 
-            st.metric("Campos encontrados", sum(bool(v) for v in data.values()))
+            # Dibujar el contador DESPUÉS de recibir la edición del grid.
+            # Un metric renderizado aquí mostraba el valor de la ejecución
+            # anterior tras borrar una celda con Suprimir.
+            espacio_campos_encontrados = st.empty()
+
+            # El historial vive en la sesión de Streamlit para que sobreviva
+            # a la reconstrucción del grid al editar o borrar con Suprimir.
+            historial_ediciones = st.session_state.setdefault("historial_edicion_tabla", {})
+            ht.contexto_nuevo(
+                historial_ediciones,
+                (area_res, st.session_state.get("examen_resultado"),
+                 st.session_state.get("cola_pdf_indice")),
+            )
 
             rows = []
             for field in aliases_area:
@@ -4609,9 +5290,11 @@ else:
                 else:
                     state = "Encontrado" if value else "No encontrado"
                 rows.append({
+                    "Actualizar": bool(st.session_state.get("seleccion_campos_excel", {}).get(field, True)),
                     "Campo": field.strip(),
                     "Información extraída": value,
                     "Estado": state,
+                    ht.COLUMNA_COMANDO: "",
                 })
             df_base = pd.DataFrame(rows)
 
@@ -4624,12 +5307,21 @@ else:
                     &nbsp;&nbsp;
                     <span style="background-color: #FFF0B3; color: #6B4D00; padding: 2px 8px; border-radius: 4px; font-weight: bold;">Amarillo:</span> Campo pendiente de revisión / no encontrado.
                     <br><br>
-                    <b>Haz doble clic sobre cualquier celda de la columna "Información extraída" para editar su contenido directamente en la tabla.</b>
-                    El editor admite textos extensos (hasta 32.767 caracteres por celda, límite técnico de Excel).
+                    <ul style="margin: 0; padding-left: 1.25rem; list-style-type: disc;">
+                        <li>Las casillas de la columna <b>Aplicar</b> indican qué campos reemplazar en el Excel al descargar. Desmarca un campo para conservar el valor anterior.</li>
+                        <li>Haz doble clic sobre cualquier celda de la columna <b>Información extraída</b> para editar su contenido directamente en la tabla. El editor admite textos extensos.</li>
+                        <li>Presionar <b>Ctrl + Z</b> o hacer clic en <b>Deshacer</b> permitirá revertir los cambios.</li>
+                    </ul>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
+
+            # Reservar la ubicación del botón ANTES del grid, pero dibujarlo
+            # DESPUÉS de procesar la edición que acaba de llegar de AG Grid.
+            # De lo contrario el primer Suprimir se registra en el historial,
+            # pero el botón conserva el estado deshabilitado del rerun previo.
+            espacio_boton_deshacer = st.empty()
 
             get_row_style = JsCode("""
             function(params) {
@@ -4673,19 +5365,47 @@ else:
             gb.configure_default_column(
                 headerStyle=dark_header_style,
                 resizable=False,
-                suppressMovable=True
+                suppressMovable=True,
             )
 
+            # Casilla interactiva por campo, independiente de seleccionar una fila.
+            casilla_actualizacion = JsCode("""
+            class CasillaActualizacion {
+                init(params) {
+                    this.params = params;
+                    this.elemento = document.createElement('input');
+                    this.elemento.type = 'checkbox';
+                    this.elemento.checked = params.value !== false;
+                    this.elemento.setAttribute('aria-label', 'Actualizar campo ' + params.data['Campo']);
+                    this.onChange = (evento) => {
+                        params.node.setDataValue('Actualizar', !!evento.target.checked);
+                    };
+                    this.elemento.addEventListener('change', this.onChange);
+                }
+                getGui() { return this.elemento; }
+                destroy() { this.elemento.removeEventListener('change', this.onChange); }
+            }
+            """)
+            gb.configure_column(
+                "Actualizar", header_name="Aplicar", editable=False, cellRenderer=casilla_actualizacion,
+                pinned="left", width=108, minWidth=96, maxWidth=118, flex=0,
+                sortable=False, filter=False, resizable=False,
+                headerTooltip="Marcado: reemplazar valor; desmarcado: conservar el valor anterior.",
+                headerClass='ag-header-centered',
+                cellStyle={'textAlign': 'center'}
+            )
             gb.configure_column(
                 "Campo",
                 editable=False,
                 flex=2,
+                headerClass='ag-header-left',
                 cellStyle={'fontWeight': 'bold', 'fontSize': '0.9rem'}
             )
             gb.configure_column(
                 "Información extraída",
                 editable=True,
                 flex=5,
+                headerClass='ag-header-left',
                 cellEditor='agLargeTextCellEditor',
                 cellEditorPopup=True,
                 cellEditorParams={'maxLength': 32767, 'rows': 18, 'cols': 85},
@@ -4695,13 +5415,123 @@ else:
                 "Estado",
                 editable=False,
                 flex=2,
+                headerClass='ag-header-centered',
                 cellStyle={'textAlign': 'center', 'fontSize': '0.85rem'}
             )
+            # Columna oculta: Ctrl+Z envía una sola orden al servidor. La
+            # operación anterior también se refleja inmediatamente en el
+            # propio grid; no es necesario forzar un segundo rerun de Streamlit.
+            gb.configure_column(ht.COLUMNA_COMANDO, hide=True, editable=False,
+                                sortable=False, filter=False, suppressColumnsToolPanel=True)
 
             grid_options = gb.build()
             grid_options['getRowStyle'] = get_row_style
             grid_options['suppressMovableColumns'] = True
-            
+            # El historial nativo se pierde cuando Streamlit reconstruye la
+            # tabla tras cualquier edición. Conservamos la última operación
+            # de la sesión únicamente como contexto EFÍMERO del grid.
+            grid_options['undoRedoCellEditing'] = False
+            grid_options['context'] = {
+                # En un remontaje, recuperar hasta veinte acciones del servidor.
+                # Las nuevas ediciones se registran también en el navegador,
+                # para no depender de la latencia del rerun para Ctrl+Z.
+                # st_aggrid.shared.walk_gridOptions no admite listas de listas
+                # dentro de gridOptions: provocaba TypeError (índice dict en list)
+                # al existir al menos un historial de ediciones. Enviar JSON
+                # como cadena y deserializarlo únicamente dentro del navegador.
+                'pilaDeshacerJson': json.dumps(
+                    historial_ediciones.get('deshacer', [])[-ht.LIMITE:],
+                    ensure_ascii=False,
+                ),
+                'ultimaEdicionReversible': (
+                    historial_ediciones.get('deshacer', [])[-1]
+                    if historial_ediciones.get('deshacer') else []
+                ),
+            }
+            # Una ÚNICA ruta de deshacer: tanto el evento del documento como
+            # el de la celda llaman al mismo manejador, sin contextos obsoletos
+            # ni doble envío. La pila local incluye el primer Suprimir incluso
+            # antes de que termine el rerun que actualiza Excel en Python.
+            grid_options['onGridReady'] = JsCode("""
+            function(params) {
+                const api = params.api;
+                const opciones = params.context || {};
+                let desdeServidor = [];
+                try {
+                    const datos = JSON.parse(opciones.pilaDeshacerJson || '[]');
+                    if (Array.isArray(datos)) {
+                        desdeServidor = datos.filter(Array.isArray)
+                            .map(grupo => grupo.map(c => ({...c})));
+                    }
+                } catch (_) {
+                    // Un contexto obsoleto no debe impedir abrir la tabla.
+                    desdeServidor = [];
+                }
+                const estado = api.__fichasUndoState || { pila: desdeServidor.slice(-20) };
+                api.__fichasUndoState = estado;
+
+                const deshacer = (evento) => {
+                    if (!evento || evento.__fichasDeshacerAtendido || evento.repeat ||
+                        !(evento.ctrlKey || evento.metaKey) || evento.altKey || evento.shiftKey ||
+                        String(evento.key || '').toLowerCase() !== 'z') return;
+                    // Dentro del editor largo o un input sigue funcionando
+                    // el deshacer de texto nativo, sin alterar el historial.
+                    if (api.getEditingCells && api.getEditingCells().length) return;
+                    if (evento.target && evento.target.closest &&
+                        evento.target.closest('input, textarea, [contenteditable="true"]')) return;
+                    const grupo = estado.pila[estado.pila.length - 1];
+                    if (!Array.isArray(grupo) || !grupo.length) return;
+                    const anteriores = new Map(grupo.map(c => [String(c.campo), c]));
+                    const nodos = [];
+                    let primerNodo = null;
+                    api.forEachNode(node => {
+                        if (!primerNodo) primerNodo = node;
+                        const cambio = anteriores.get(String(node.data['Campo']));
+                        if (!cambio) return;
+                        const valor = cambio.antes == null ? '' : String(cambio.antes);
+                        node.data['Información extraída'] = valor;
+                        const campo = String(cambio.campo);
+                        node.data['Estado'] = cambio.antes_editado && valor ? 'Modificado por usuario' :
+                            ['Nombre LIS', 'Laboratorio de procesamiento', 'Actualizado por',
+                             'Autorizado por'].includes(campo) ?
+                                (valor ? 'Ingresado por usuario' : 'Pendiente de ingreso') :
+                            campo === 'Fecha actualización' ?
+                                (valor ? 'Asignado por sistema' : 'Pendiente de asignación') :
+                                (valor ? 'Encontrado' : 'No encontrado');
+                        nodos.push(node);
+                    });
+                    if (!nodos.length || !primerNodo) return;
+                    evento.__fichasDeshacerAtendido = true;
+                    evento.preventDefault();
+                    evento.stopPropagation();
+                    if (evento.stopImmediatePropagation) evento.stopImmediatePropagation();
+                    estado.pila.pop();
+                    api.refreshCells({rowNodes: nodos, force: true});
+                    // Se cambia solo la marca, no el valor restaurado:
+                    // una única comunicación al backend, sin repetir eventos.
+                    primerNodo.setDataValue('__historial_accion',
+                        'deshacer:' + Date.now() + ':' + Math.random());
+                };
+                api.__fichasUndoTecla = deshacer;
+                // Las teclas se escuchan en el iframe de la tabla. Al
+                // reconstruir el grid, soltar la escucha anterior.
+                if (window.__fichasCtrlZHandler) {
+                    document.removeEventListener('keydown', window.__fichasCtrlZHandler, true);
+                }
+                window.__fichasCtrlZHandler = deshacer;
+                document.addEventListener('keydown', deshacer, true);
+            }
+            """)
+            grid_options['onCellKeyDown'] = JsCode("""
+            function(params) {
+                // Respaldo del evento nativo de AG Grid cuando el navegador
+                // entrega la tecla a una celda y no al documento del iframe.
+                // Ambos caminos ejecutan exactamente la misma función.
+                const accion = params.api.__fichasUndoTecla;
+                if (typeof accion === 'function') accion(params.event);
+            }
+            """)
+
             grid_options['onCellValueChanged'] = JsCode("""
             function(params) {
                 if (params.column && params.column.colDef && params.column.colDef.field === 'Información extraída') {
@@ -4709,19 +5539,39 @@ else:
                     if (newVal.toLowerCase() === 'nan' || newVal.toLowerCase() === 'none' || newVal.toLowerCase() === 'null') {
                         newVal = '';
                     }
-                    
+                    // La pila en AG Grid registra la edición EN EL INSTANTE
+                    // en que cambia la celda; no espera la respuesta de
+                    // Streamlit (y conserva el primer borrado con Suprimir).
+                    const antes = params.oldValue == null ? '' : String(params.oldValue).trim();
+                    if (antes !== newVal) {
+                        const cambio = {
+                            campo: String(params.data['Campo']),
+                            antes: antes,
+                            despues: newVal,
+                            antes_editado: params.data['Estado'] === 'Modificado por usuario',
+                            despues_editado: !!newVal,
+                        };
+                        const estadoUndo = params.api.__fichasUndoState ||
+                            (params.api.__fichasUndoState = {pila: []});
+                        estadoUndo.pila.push([cambio]);
+                        if (estadoUndo.pila.length > 20) estadoUndo.pila.shift();
+                        if (params.context) params.context.ultimaEdicionReversible = [cambio];
+                    }
+
                     if (newVal === '') {
                         var campo = params.data['Campo'];
                         if (['Nombre LIS', 'Laboratorio de procesamiento', 'Actualizado por', 'Autorizado por'].includes(campo)) {
-                            params.node.setDataValue('Estado', 'Pendiente de ingreso');
+                            params.data['Estado'] = 'Pendiente de ingreso';
                         } else if (campo === 'Fecha actualización') {
-                            params.node.setDataValue('Estado', 'Pendiente de asignación');
+                            params.data['Estado'] = 'Pendiente de asignación';
                         } else {
-                            params.node.setDataValue('Estado', 'No encontrado');
+                            params.data['Estado'] = 'No encontrado';
                         }
                     } else {
-                        params.node.setDataValue('Estado', 'Modificado por usuario');
+                        params.data['Estado'] = 'Modificado por usuario';
                     }
+                    // Actualizar la apariencia sin emitir otro evento de
+                    // valor modificado: evita reruns duplicados de Streamlit.
                     params.api.refreshCells({rowNodes: [params.node], force: true});
                 }
             }
@@ -4734,14 +5584,71 @@ else:
                 df_base,
                 gridOptions=grid_options,
                 allow_unsafe_jscode=True,
-                update_mode=GridUpdateMode.MODEL_CHANGED,
+                update_mode=GridUpdateMode.VALUE_CHANGED,  # Evitar reruns por el refresco del modelo.
+                reload_data=False,
                 fit_columns_on_grid_load=True,
                 theme="alpine",
                 height=altura_tabla,
+                custom_css={
+                    ".ag-header-centered .ag-header-cell-label": {"justify-content": "center", "width": "100%"},
+                    ".ag-header-centered .ag-header-cell-text": {"text-align": "center", "width": "100%"},
+                    ".ag-header-left .ag-header-cell-label": {"justify-content": "flex-start", "width": "100%"},
+                    ".ag-header-left .ag-header-cell-text": {"text-align": "left", "width": "100%"},
+                },
                 key=f"aggrid_data_table_{st.session_state['aggrid_key_counter']}"
             )
 
             edited_df = pd.DataFrame(grid_response['data'])
+            filas_de_grid = edited_df.to_dict('records')
+            # El grid puede retener la última marca oculta al actualizarse
+            # sin volver a montar el componente. Una misma marca se consume
+            # UNA sola vez para evitar deshacer en cascada durante otros reruns.
+            marca_historial = ht.marca_desde_filas(filas_de_grid)
+            if (marca_historial
+                    and marca_historial != st.session_state.get("marca_historial_consumida")):
+                st.session_state["marca_historial_consumida"] = marca_historial
+                comando_historial = ht.comando_desde_filas(filas_de_grid)
+            else:
+                comando_historial = None
+            if comando_historial == "deshacer":
+                # El navegador ya restauró visualmente las celdas. Sincronizar
+                # el historial Python y el Excel en este MISMO rerun, evitando
+                # st.rerun() (causaba dos reconstrucciones por atajo).
+                acciones_pendientes = historial_ediciones.get("deshacer") or []
+                campos_anteriores = {
+                    cambio["campo"] for cambio in (acciones_pendientes[-1]
+                                                    if acciones_pendientes else [])
+                }
+                if _aplicar_historial_tabla("deshacer", actualizar_grid=False):
+                    editados_recuperados = st.session_state.get("user_edited_fields", set())
+                    for indice, fila_rec in edited_df.iterrows():
+                        campo_rec = str(fila_rec["Campo"])
+                        if campo_rec not in campos_anteriores:
+                            continue
+                        valor_rec = st.session_state["data_extracted"].get(campo_rec, "")
+                        edited_df.at[indice, "Información extraída"] = valor_rec
+                        if campo_rec in editados_recuperados and valor_rec:
+                            estado_rec = "Modificado por usuario"
+                        elif campo_rec in ("Nombre LIS", "Laboratorio de procesamiento",
+                                           "Actualizado por", "Autorizado por"):
+                            estado_rec = "Ingresado por usuario" if valor_rec else "Pendiente de ingreso"
+                        elif campo_rec == "Fecha actualización":
+                            estado_rec = "Asignado por sistema" if valor_rec else "Pendiente de asignación"
+                        else:
+                            estado_rec = "Encontrado" if valor_rec else "No encontrado"
+                        edited_df.at[indice, "Estado"] = estado_rec
+            else:
+                ht.registrar_cambios(
+                    historial_ediciones,
+                    st.session_state.get("data_extracted", {}),
+                    st.session_state.get("user_edited_fields", set()),
+                    filas_de_grid,
+                )
+            seleccion_actual = st.session_state.setdefault("seleccion_campos_excel", {})
+            for _, fila_check in edited_df.iterrows():
+                campo_check = str(fila_check["Campo"])
+                seleccion_actual[campo_check] = campo_marcado_para_actualizar(
+                    fila_check.get("Actualizar", seleccion_actual.get(campo_check, True)))
 
             if "data_extracted" in st.session_state:
                 for idx, row in edited_df.iterrows():
@@ -4760,30 +5667,56 @@ else:
                     else:
                         st.session_state.get("user_edited_fields", set()).discard(field)
 
+            # Contar lo que realmente devolvió AG Grid, no los valores
+            # anteriores al borrado. El placeholder conserva la ubicación
+            # original del indicador, sin forzar otro st.rerun.
+            espacio_campos_encontrados.metric(
+                "Campos encontrados",
+                ht.contar_campos_encontrados(st.session_state.get("data_extracted", {})),
+            )
+
+            # Este bloque se renderiza arriba de la tabla gracias al espacio
+            # reservado. Su estado ya incluye el PRIMER cambio de esta ejecución.
+            with espacio_boton_deshacer.container():
+                col_deshacer, _ = st.columns([1, 4])
+                with col_deshacer:
+                    st.button(
+                        "↶ Deshacer", key="btn_deshacer_tabla", use_container_width=True,
+                        disabled=not bool(historial_ediciones.get("deshacer")),
+                        on_click=_aplicar_historial_tabla, args=("deshacer",),
+                    )
+
             updated_excel_bytes = aplicar_ediciones_a_excel(
                 st.session_state["result_bytes"],
                 edited_df,
-                examen_activo or ""
+                examen_activo or "",
+                campos_forzar=st.session_state.pop("campos_restaurados_tabla", None),
             )
             st.session_state["result_bytes"] = updated_excel_bytes
+            # La descarga y la escritura SQLite usan la MISMA versión filtrada.
+            # El libro editable sigue guardando todas las propuestas para permitir
+            # que el usuario cambie nuevamente sus casillas sin perder información.
+            excel_con_confirmaciones = respetar_campos_no_seleccionados(
+                updated_excel_bytes,
+                st.session_state.get("bytes_plantilla_inicial"),
+                examen_activo or "",
+                seleccion_actual,
+            )
 
             st.write("")
-            st.subheader("Opciones de guardado y avance de cola")
+            st.subheader("Opciones de guardado y avance de cola", anchor=False)
 
             col_down, col_update, col_next = st.columns(3)
 
             with col_down:
-                ZONA_HORARIA = ZoneInfo("America/Santiago")
-                fecha_str = datetime.now(ZONA_HORARIA).strftime("%d-%m-%Y")
-                area_clean = (area_activa or "General").replace(" ", "_")
-                nombre_archivo_excel = f"Ficha_Técnica_Actualizada_{area_clean}_{fecha_str}.xlsx"
+                nombre_archivo_excel = nombre_ficha_tecnica(
+                    area_activa, st.session_state.get("fecha_ultima_extraccion_ficha"))
 
                 try:
                     excel_para_descarga = validar_excel_para_descarga(
-                        st.session_state["result_bytes"])
-                    # Mantener la versión normalizada para las próximas
-                    # descargas; no altera la información guardada en SQLite.
-                    st.session_state["result_bytes"] = excel_para_descarga
+                        excel_con_confirmaciones)
+                    # No sobrescribir el libro editable: si el usuario vuelve a
+                    # marcar un campo, su texto recién extraído debe recuperarse.
                 except ValueError as error_excel:
                     excel_para_descarga = None
                     st.error(f"No se pudo validar el Excel. No se descargará un archivo dañado: {error_excel}")
@@ -4811,9 +5744,11 @@ else:
                           if discrepancias_sin_revisar else None),
                 ):
                     bytes_iniciales = st.session_state.get("bytes_plantilla_inicial")
+                    st.session_state["excel_para_actualizar"] = validar_excel_para_descarga(
+                        excel_con_confirmaciones)
                     st.session_state["comparacion_planilla_detalles"] = comparar_plantillas_excel(
                         bytes_iniciales,
-                        st.session_state["result_bytes"],
+                        st.session_state["excel_para_actualizar"],
                         examen_activo or ""
                     )
                     registro_modificacion = st.session_state.get("revision_plantilla_origen") or gp.estado_recurso(DB_PATH, "area:" + area_activa)
@@ -4837,25 +5772,11 @@ else:
                             key="btn_continuar_siguiente_examen", help=None,
                         )
                     if avanzar_cola:
+                        # Conservar únicamente los campos marcados y no perder
+                        # ninguna ficha ya procesada al pasar de PDF.
+                        st.session_state["result_bytes"] = excel_con_confirmaciones
                         st.session_state["cola_pdf_indice"] = idx_actual + 1
-
-                        st.session_state["examen_activo"] = None
-                        st.session_state["acreditacion_manual_id"] = None
-                        st.session_state["_acreditacion_reset_pendiente"] = True
-                        st.session_state["cartera_examen_emparejado"] = "Sin vincular"
-                        st.session_state["_sel_cartera_pendiente"] = None
-                        st.session_state.pop("candidatos_cartera_pendientes", None)
-
-                        st.session_state.pop("data_extracted", None)
-                        st.session_state.pop("user_edited_fields", None)
-                        st.session_state.pop("extracted_text", None)
-                        st.session_state.pop("contexto_emparejamiento_cartera", None)
-                        st.session_state.pop("omitir_emparejamiento_examen", None)
-                        st.session_state.pop("modo_referencia_aplicado", None)
-
-                        st.session_state["mostrar_modal_examenes"] = False
-                        st.session_state.pop("modal_area_activa", None)
-
+                        _limpiar_examen_para_siguiente_pdf()
                         st.rerun()
                 elif not modo_conjunto:
                     if total_pdfs > 1:
@@ -4867,7 +5788,7 @@ else:
                 st.text_area("Texto", st.session_state.get("extracted_text", ""), height=350, key="raw_extracted_text")
 
     with tab_export:
-        st.subheader("Exportar a otro formato")
+        st.subheader("Exportar a otro formato", anchor=False)
         st.write("Convierte un archivo Excel a otro formato desde esta pestaña.")
         template_exportacion = st.file_uploader(
             "Cargar Excel para exportar", type=["xlsx"],

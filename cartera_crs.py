@@ -169,11 +169,30 @@ def sincronizar_vinculo_en_sesion(estado, db_path, examen, area, opciones, revis
     return seleccionado
 
 
-def candidatos_cartera(db_path, nombre_examen, area, limite=8):
-    """Devuelve similitud real de nombre (0..1); área solo ordena empates.
 
-    Un pequeño bonus por área puede ordenar candidatos, pero nunca debe
-    convertir una similitud inferior al 100% en «100%» mostrado al usuario.
+def _prioridad_nombre_examen(nombre_buscar, nombre_candidato):
+    """Misma prioridad clínica que Acreditación para ordenar candidatos."""
+    return fd.similitud_sugerencia_clinica(nombre_buscar, nombre_candidato)[0]
+
+
+def similitud_nombre_cartera(nombre_examen, candidato):
+    """Porcentaje textual común a CRS y Acreditación, no equivalencia médica.
+
+    Los nombres completos compuestos (p. ej. «AC. LUPICO») no pierden
+    prioridad por prefijos largos de la cartera; un parecido solo por letras
+    no puede superar automáticamente un nombre íntegro compartido.
+    """
+    return fd.similitud_sugerencia_clinica(nombre_examen, candidato)[1]
+
+
+def candidatos_cartera(db_path, nombre_examen, area, limite=8, similitud_minima=0.0):
+    """Prioriza el nombre clínico y completa con alternativas por similitud.
+
+    Filtra por similitud ANTES de limitar el resultado; de lo contrario, las
+    variantes de un nombre y otros exámenes de la misma área pueden ocupar
+    los primeros puestos y dejar sin mostrar coincidencias difusas válidas.
+    El área solo desempata porcentajes iguales y nunca altera los valores
+    del cálculo textual ni sustituye la selección manual del encargado.
     """
     objetivo = _norm(nombre_examen)
     if not objetivo:
@@ -184,16 +203,15 @@ def candidatos_cartera(db_path, nombre_examen, area, limite=8):
     encontrados = []
     for nombre, lab in filas:
         nom_norm = _norm(nombre)
-        ratio = SequenceMatcher(None, objetivo, nom_norm).ratio()
-        if nom_norm == objetivo:
-            ratio = 1.0
-        # Bonus exclusivamente para clasificación; no altera «Similitud».
-        prioridad_orden = ratio + (0.02 if lab and area_norm == fd.area_equivalente(lab) else 0)
-        encontrados.append((nombre, lab or "", ratio, prioridad_orden))
-    # Primero los nombres realmente idénticos, aunque una coincidencia casi
-    # exacta de otra área haya recibido un bonus de clasificación.
-    encontrados.sort(key=lambda item: (-(item[2] == 1.0), -item[3], -item[2], _norm(item[0])))
-    return [(nombre, lab, ratio) for nombre, lab, ratio, _ in encontrados[:limite]]
+        prioridad_nombre, ratio = fd.similitud_sugerencia_clinica(objetivo, nom_norm)
+        # Aplicar el umbral antes del top-N. Las alternativas difusas siguen
+        # visibles solo cuando su semejanza textual es suficiente.
+        if ratio < similitud_minima:
+            continue
+        misma_area = bool(lab and area_norm == fd.area_equivalente(lab))
+        encontrados.append((nombre, lab or "", ratio, prioridad_nombre, misma_area))
+    encontrados.sort(key=lambda item: (-item[3], -item[2], -int(item[4]), _norm(item[0])))
+    return [(nombre, lab, ratio) for nombre, lab, ratio, _, _ in encontrados[:limite]]
 
 
 def candidatos_variantes_cartera(db_path, nombre_examen, area, limite=5):

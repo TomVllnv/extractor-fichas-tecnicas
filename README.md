@@ -13,6 +13,65 @@ Aplicación desarrollada con Python y Streamlit para extraer información de doc
 7. Selecciona el laboratorio de procesamiento, carga el PDF y pulsa **Analizar documento**.
 8. Descarga el Excel actualizado y revisa la información contra el documento original antes de utilizarla.
 
+## Corrección de coincidencias y deshacer más ligero (12-11-2026)
+
+- **CRS y Acreditación:** ambas carteras utilizan el mismo porcentaje textual.
+  Para un nombre compuesto, se reconoce la frase íntegra por palabras y se
+  reduce la valoración de coincidencias que solo comparten letras, sin
+  vocabulario distintivo. Ejemplo con examen activo «AC. LUPICO»:
+  «AC. CIRCULANTES O AC. LUPICO NUEVO» alcanza aproximadamente 86 %;
+  «ACIDO URICO» obtiene aproximadamente 53 % y no supera el umbral del 55 %.
+  Para nombres simples, las cifras anteriormente validadas como
+  PROTROMBINA / PROTROMBINA TACO NUEVO no cambian. **No se automatiza el
+  vínculo**: el usuario debe confirmar cualquier sugerencia no exacta.
+- **Deshacer en AG Grid:** Ctrl+Z, con el foco dentro de la tabla pero fuera del editor, recupera el último cambio
+  o borrado de «Información extraída»; restaura primero las celdas en la tabla
+  y comunica una única orden a Python para sincronizar el Excel. Se retiró
+  el rerun adicional forzado, se evita ejecutar dos veces la misma orden
+  durante reruns posteriores y se retiraron Ctrl+Y, Ctrl+Mayús+Z y el botón
+  Rehacer. El botón Deshacer y el atajo nativo dentro del editor se conservan.
+  Aún se requiere una comunicación con Streamlit por deshacer: la comprobación
+  de fluidez final debe realizarse en el navegador institucional.
+- **Cola:** el texto pasa a ser «Documentos (arrastrar para ordenar)».
+
+## Revisión, deshacer y omitir fichas de la cola (12-11-2026)
+
+- En la tabla «Información extraída», selecciona una celda (sin entrar al
+  editor de texto) y pulsa **Ctrl+Z** para recuperar una modificación o un
+  borrado con **Suprimir**. También hay un botón «Deshacer» encima de la
+  tabla como alternativa al teclado. Se eliminó el comando Ctrl+Y y el botón
+  «Rehacer» por rendimiento. El historial conserva las últimas **20 acciones**,
+  únicamente en la sesión y para el examen activo; no revierte cambios ya
+  guardados en SQLite. Dentro del editor de texto sigue operando el deshacer
+  habitual del navegador.
+- Al cargar más de un PDF en la modalidad **Un PDF por examen**, antes de
+  analizar cada documento aparece «Omitir este examen y pasar al siguiente».
+  Omitir no genera una hoja, no actualiza ninguna base y no modifica el Excel
+  consolidado de los exámenes anteriores. Si se omite el último PDF, se
+  muestran directamente las acciones de descargar y actualizar el archivo
+  consolidado existente, previa confirmación de la actualización SQLite.
+  Si todos se omiten, no se genera un Excel nuevo.
+- El examen seleccionado en el menú lateral se destaca en verde; «Sin
+  seleccionar» aparece naranja. Se elimina el antiguo aviso explicativo
+  del cambio de área, pero se mantiene su confirmación al cambiar de área.
+- «Referencias bibliográficas» aparece bajo el título «Referencias» y está
+  inicialmente abierto, conservando luego el estado que el usuario elija.
+
+## Sugerencias de Cartera de Acreditación (12-11-2026)
+
+Cuando el examen no tiene una coincidencia exacta, la herramienta muestra
+hasta cinco sugerencias. Se priorizan palabras clínicas distintivas presentes
+en ambos nombres (por ejemplo, «lúpico»), incluso si se usan abreviaturas o
+calificadores, y se consideran además las coincidencias por caracteres.
+El sistema filtra resultados inferiores al 55 % antes de limitar la lista.
+
+Si el usuario ha vinculado manualmente un examen en la Cartera CRS, la
+búsqueda de sugerencias de Acreditación considera también ese nombre
+institucional. **No se vincula automáticamente** ningún resultado difuso o
+obtenido solo de la referencia CRS: el encargado debe confirmarlo en el
+selector de Acreditación. Los porcentajes representan semejanza textual,
+no equivalencia clínica.
+
 ## Cambio de área: limpieza automática de la sesión
 
 Al seleccionar un área distinta en la barra lateral, la aplicación **descarta el trabajo
@@ -333,33 +392,42 @@ Cada PDF se extrae por separado. Los campos encontrados en documentos posteriore
 
 ## Fuentes documentales institucionales — actualización
 
-Esta versión conserva la **Cartera de Exámenes** original de SQLite (393 registros del proyecto base) y mantiene **tres fuentes independientes**:
+Esta versión conserva la **Cartera de Exámenes** de SQLite y mantiene **dos fuentes documentales independientes** (además de la propia Cartera de Exámenes):
 
 1. **Normas Generales de Toma de Muestras**: contiene los textos predeterminados de **Preparación del paciente**, **Procedimiento de toma de muestras**, **Rotulación** y **Criterios de rechazo**. El original incorporado es `documentos institucionales.docx.pdf`, la copia PDF disponible del documento Word. Se puede actualizar desde el menú lateral con `.docx` o `.pdf` que incluya los cuatro apartados.
 2. **Cartera de Acreditación**: contiene **374 prestaciones** del documento `Cartera_Acreditacion_CRS_v0.2.3.xlsx`, incluida su columna **Prestación**, área y los seis pares de texto/estado. Se puede reemplazar desde el menú lateral por otra versión válida que conserve la hoja `Cartera_Completa` y los encabezados correspondientes.
 
-3. **Manual de toma de muestras**: incluye el PDF original `MANUAL DE TOMA DE MUESTRAS LABORATORIO CLINICO DEL  CRSCO.pdf` y dos textos extraídos y depurados: **Recepción de muestras** y **Procesamiento de muestras**. El primero empieza en «Las muestras deben ser recepcionadas por un técnico paramédico o profesional de la salud» y termina en «cumplen con lo estipulado por el Laboratorio del CRSCO»; el segundo comienza después del título «2. MUESTRAS PROCEDENTES DE LA TOMA DE MUESTRAS DEL LABORATORIO DEL CRSCO» y termina en «secretaría de laboratorio». Las cabeceras, pies, códigos y folios se excluyen según posición en la página y frases delimitadoras. Si el manual actualizado no contiene ambos fragmentos completos, **la actualización se rechaza y el contenido anterior no se modifica**. Solo acepta PDF con texto seleccionable. El nombre del original y la fecha de actualización se actualizan dinámicamente al reemplazarlo.
+Los campos **Recepción de muestras** y **Procesamiento de muestras** siguen
+presentes en la ficha, pero ya no tienen alias de extracción ni origen en PDF,
+Normas, Carteras o Manual: permanecen vacíos por defecto. El usuario puede
+completarlos manualmente en la revisión si lo necesita. Al abrir esta versión
+con una SQLite anterior, se crea un respaldo y se retiran únicamente el PDF y
+los fragmentos del Manual almacenados; la tabla exclusiva `manual_toma_campos`
+también se elimina. **Las Normas generales permanecen intactas**, así como
+los historiales de auditoría y el resto de los recursos institucionales.
 
 
 Las fuentes documentales muestran la **fecha y hora de actualización** en formato día/mes/año, permiten **descargar el archivo original guardado en SQLite** y **actualizarlo**. Las cargas nuevas se validan antes de reemplazar registros; si falla la importación, se conserva el archivo previo.
 
-En el menú lateral **Base de datos (SQLite)**, las fuentes se presentan en orden alfabético mediante **Cartera de exámenes y acreditación** (pestañas **Acreditación** y **Exámenes**) y **Manual de toma de muestras** (pestañas **Manual** y **Normas generales**). Cada pestaña conserva por separado los controles de carga, fecha, nombre dinámico del documento y descarga. Los botones de descarga utilizan solo la primera letra mayúscula; los nombres propios de las áreas se mantienen sin cambios.
+En el menú lateral **Base de datos**, las fuentes aparecen en **Cartera de exámenes y acreditación** (pestañas **Acreditación** y **Exámenes**) y **Normas generales de toma de muestras**, sin pestaña ni carga para el Manual retirado. Los controles para descargar o reemplazar Normas siguen disponibles.
 
 
-### Prioridad de llenado y procedencia de los ocho campos
+### Prioridad de llenado y procedencia de los campos
 
 | Campo de la ficha | Primera prioridad | Respaldo en orden |
 |---|---|---|
 | Preparación del paciente | **Cartera de Exámenes del CRS**, columna `INDICACIONES` del examen emparejado | **Cartera de acreditación** (`Preparación del paciente · texto`) y luego **Normas generales** |
-| Procedimiento de toma de muestras | Cartera de acreditación | Normas generales |
-| Rotulación | Cartera de acreditación | Normas generales |
-| Criterios de rechazo | Cartera de acreditación | Normas generales |
+| Procedimiento de toma de muestras | **Normas Generales de Toma de Muestras** | Cartera de acreditación, si no hay un texto válido en Normas |
+| Rotulación | **Normas Generales de Toma de Muestras** | Cartera de acreditación, si no hay un texto válido en Normas |
+| Criterios de rechazo | **Normas Generales de Toma de Muestras** | Cartera de acreditación, si no hay un texto válido en Normas |
 | Muestra requerida y recipiente | Cartera de acreditación | Sin respaldo genérico |
 | Condiciones de envío al Laboratorio | Cartera de acreditación | Sin respaldo genérico |
-| Recepción de muestras | Manual de toma de muestras | Sin respaldo alternativo |
-| Procesamiento de muestras | Manual de toma de muestras | Sin respaldo alternativo |
+| Recepción de muestras | Sin extracción automática | Vacío por defecto; edición manual opcional |
+| Procesamiento de muestras | Sin extracción automática | Vacío por defecto; edición manual opcional |
 
-**Caso particular de Preparación:** en **Acreditación**, «No aplica» y las frases pendientes (incluyendo la instrucción de consultar manuales del laboratorio externo) NO bloquean el respaldo de Normas. En el primer documento del CRS, el contenido no vacío y válido de `INDICACIONES` prevalece, incluso si dice «No aplica». Si `INDICACIONES` del CRS es válida, tiene prioridad absoluta. Para los otros campos, «No aplica» puede seguir siendo una respuesta institucional válida. Los PDF técnicos analizados no sustituyen estos ocho campos; las ediciones manuales confirmadas prevalecen cuando se vuelve a analizar el mismo examen.
+Para estos tres campos, una coincidencia válida de Acreditación **no reemplaza** el texto válido de Normas. Los demás campos mantienen sus prioridades anteriores.
+
+**Caso particular de Preparación:** en **Acreditación**, «No aplica», «No aplicable», «N/A» y «NA» se aceptan en `Preparación del paciente · texto` si el estado documental es válido (`Específico` o `Heredado`); prevalecen sobre Normas. Las frases pendientes, instrucciones de consultar manuales del laboratorio externo y avisos genéricos siguen descartándose. En la Cartera de Exámenes del CRS, el contenido no vacío y válido de `INDICACIONES` mantiene la prioridad absoluta, incluso si dice «No aplica». En **Normas**, «No aplica» continúa filtrándose para este campo. Los PDF técnicos analizados no sustituyen estos ocho campos; las ediciones manuales confirmadas prevalecen cuando se vuelve a analizar el mismo examen.
 
 La sección **Procedencia de campos documentales** usa un aspecto de cuaderno con líneas tenues y nombres de campos en azul marino; siempre muestra la fuente realmente seleccionada.
 
@@ -465,13 +533,11 @@ La herramienta calcula automáticamente el ancho de las columnas de las
 plantillas sin depender de Excel. Los anchos se limitan para evitar columnas
 desmesuradas con indicaciones clínicas extensas.
 
-**VBA opcional en Microsoft Excel para ajuste exacto:** se incluye
-`AutoajustarColumnas.bas`, cuyo procedimiento contiene la instrucción
-`Cells.EntireColumn.AutoFit`. Excel no ejecuta macros dentro de archivos
-`.xlsx`. Para utilizarla, abre una copia del libro en Excel de escritorio,
-guárdala como `.xlsm`, importa el archivo `.bas` desde el editor de VBA y
-ejecuta `AutoajustarColumnas`. Esta macro es **opcional** y nunca se ejecuta
-automáticamente; solo importa archivos y macros de confianza.
+**Ajuste automático sin VBA:** la herramienta calcula el ancho de columnas y
+el alto de las filas desde Python al exportar las fichas `.xlsx`. Ya no se
+incluye `AutoajustarCampos.bas`, que era una macro manual opcional para Excel
+de escritorio. El cálculo de Python no es idéntico al `AutoFit` visual de Excel,
+pero funciona tanto en Linux como en Windows sin ejecutar macros.
 
 ### Presentación de procedencia, referencias y compatibilidad Excel (noviembre 2026)
 
@@ -557,3 +623,21 @@ documentos, respaldos y secretos de la instalación.
 
 La lógica de extracción, OCR, comparaciones y edición de los datos clínicos
 no se modificó. Detalles y verificaciones en `CAMBIOS_TEST_2026-11-09.txt`.
+
+
+### Confirmación de cambio de área y control de reemplazos (10-11-2026)
+
+- Al elegir otra área desde el menú lateral, si hay PDF/Excel adjuntos o campos
+  seleccionados/completados se solicita confirmación. Continuar descarta el
+  trabajo temporal del área actual; Cancelar lo conserva. No se modifican
+  catálogos, plantillas ni usuarios almacenados en SQLite.
+- En la tabla de extracción, la casilla «✔ / Actualizar» aparece marcada por
+  defecto para cada campo. Desmarcarla conserva el valor anterior de la misma
+  celda en la plantilla Excel. La decisión afecta tanto al archivo descargado
+  como a «Actualizar en base de datos». Si la ficha no existía previamente,
+  el campo desmarcado queda vacío. El texto extraído permanece visible para
+  que pueda volver a habilitarse antes de finalizar.
+- Los ajustes de columnas y filas dependen ahora únicamente de Python.
+  No se distribuyen macros VBA ni son necesarias para abrir los archivos `.xlsx`.
+- El proyecto no incluye base de datos SQLite en el ZIP. Nunca reemplazar una
+  base activa por un archivo de demostración; conservar sus respaldos.
