@@ -12,7 +12,7 @@ BRIDGE = (ROOT / 'interfaz_fluida.py').read_text(encoding='utf-8')
 
 class TestOptimizacionInterfaz(unittest.TestCase):
     def test_elimina_solo_expander_secundario_de_avisos(self):
-        self.assertIn('with st.expander("Referencias bibliográficas", expanded=False)', APP)
+        self.assertIn('with st.expander("Referencias bibliográficas", expanded=True)', APP)
         self.assertNotIn('with st.expander("Datos bibliográficos que conviene verificar")', APP)
         self.assertIn('apa.advertencias_fuentes(seleccionadas)', APP)
         self.assertIn('for aviso in avisos:', APP)
@@ -40,9 +40,9 @@ class TestOptimizacionInterfaz(unittest.TestCase):
     def test_descargas_sidebar_no_rehacen_la_pagina(self):
         sidebar = APP.split('# --- SIDEBAR ---', 1)[1].split('# --- VISTA PRINCIPAL ---', 1)[0]
         for key in ('dl_area_btn_', 'descargar_acreditacion_original', 'dl_cartera_btn',
-                    'descargar_manual_toma_original', 'descargar_normas_original'):
+                    'descargar_normas_original'):
             self.assertIn(key, sidebar)
-        self.assertGreaterEqual(sidebar.count('on_click="ignore"'), 5)
+        self.assertGreaterEqual(sidebar.count('on_click="ignore"'), 4)
 
     def test_bibliografia_pdf_en_cache_sin_alterar_pdf(self):
         target = next(n for n in ast.parse(APP).body

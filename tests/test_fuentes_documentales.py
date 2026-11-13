@@ -28,8 +28,8 @@ class TestFuentesDocumentales(unittest.TestCase):
             self.assertEqual(con.execute('SELECT COUNT(*) FROM cartera_examenes').fetchone()[0],393)
             self.assertEqual(con.execute('SELECT COUNT(*) FROM prestaciones_acreditacion').fetchone()[0],374)
             self.assertEqual(con.execute('SELECT COUNT(*) FROM normas_generales_campos').fetchone()[0],4)
-            self.assertEqual(con.execute('SELECT COUNT(*) FROM manual_toma_campos').fetchone()[0],2)
-        for fuente in (fd.NORMAS_ID,fd.ACREDITACION_ID,fd.MANUAL_ID):
+            self.assertIsNone(con.execute("SELECT name FROM sqlite_master WHERE name='manual_toma_campos'").fetchone())
+        for fuente in (fd.NORMAS_ID,fd.ACREDITACION_ID):
             meta = fd.documento_fuente(self.db,fuente,True)
             self.assertTrue(meta['archivo'])
             self.assertEqual(len(meta['sha256']),64)
@@ -41,32 +41,35 @@ class TestFuentesDocumentales(unittest.TestCase):
         self.assertNotEqual(val['Preparación del paciente'], 'No aplica')
         self.assertTrue(org['Preparación del paciente'].startswith('Normas Generales'))
         self.assertIn('Suero',val['Muestra requerida y recipiente'])
-        self.assertEqual(len(val),8)
-        self.assertTrue(all('Cartera de Acreditación' in org[c] for c in fd.MAPA_ACREDITACION if c != 'Preparación del paciente'))
-        self.assertTrue(all(org[c] == 'Manual de toma de muestras' for c in fd.CAMPOS_MANUAL))
+        self.assertEqual(len(val),6)
+        for c in fd.CAMPOS_NORMAS_PRIORITARIAS:
+            self.assertEqual(org[c], 'Normas Generales de Toma de Muestras')
+        for c in ('Muestra requerida y recipiente', 'Condiciones de envío al Laboratorio'):
+            self.assertIn('Cartera de Acreditación', org[c])
+        self.assertTrue(all(c not in val and c not in org for c in fd.CAMPOS_MANUAL))
 
     def test_pendiente_usa_normas_no_texto_pendiente(self):
         val,org,pre,_ = fd.obtener_valores_fuentes(self.db,'17 - Hidroxiprogesterona','Derivados')
         self.assertIsNotNone(pre)
-        self.assertEqual(len(val),7)
+        self.assertEqual(len(val),5)
         self.assertNotIn('Muestra requerida y recipiente',val)
         self.assertTrue(org['Preparación del paciente'].startswith('Normas Generales'))
         self.assertIn('Higiene de manos',val['Procedimiento de toma de muestras'])
-        self.assertIn('Cartera de Acreditación',org['Rotulación'])
+        self.assertIn('Normas Generales',org['Rotulación'])
 
     def test_sin_match_no_aplica_datos_de_otra_prestacion(self):
         val,org,pre,msg = fd.obtener_valores_fuentes(self.db,'examen desconocido','Microbiología')
         self.assertIsNone(pre)
         self.assertEqual(msg,'sin coincidencia exacta')
-        self.assertEqual(set(val),set(fd.CAMPOS_NORMAS) | set(fd.CAMPOS_MANUAL))
+        self.assertEqual(set(val),set(fd.CAMPOS_NORMAS))
         self.assertTrue(all('Normas' in org[c] for c in fd.CAMPOS_NORMAS))
-        self.assertTrue(all('Manual' in org[c] for c in fd.CAMPOS_MANUAL))
+        self.assertTrue(all(c not in val and c not in org for c in fd.CAMPOS_MANUAL))
 
     def test_area_incompatible_no_se_autovincula(self):
         val,orig,pre,msg = fd.obtener_valores_fuentes(self.db,'VITAMINA D','Microbiología')
         self.assertIsNone(pre)
         self.assertIn('otra área',msg)
-        self.assertEqual(len(val),6)
+        self.assertEqual(len(val),4)
 
     def test_vinculo_manual(self):
         with sqlite3.connect(self.db) as con:

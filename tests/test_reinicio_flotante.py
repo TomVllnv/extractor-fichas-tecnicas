@@ -86,7 +86,8 @@ class ReinicioFlotanteTest(unittest.TestCase):
     def test_giro_y_confirmacion_visual_sin_textos_adicionales(self):
         self.assertIn('position: fixed !important;', SOURCE)
         self.assertIn('right: 22px;', SOURCE)
-        self.assertIn('bottom: 24px;', SOURCE)
+        self.assertIn('bottom: 78px;', SOURCE)
+        self.assertIn('right: 12px; bottom: 96px;', SOURCE)
         self.assertIn('background: #f8fafc', SOURCE)
         self.assertIn('color: #111827', SOURCE)
         self.assertIn('reinicio_flecha_giratoria 0.9s linear infinite', SOURCE)

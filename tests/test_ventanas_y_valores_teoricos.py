@@ -38,7 +38,8 @@ FUNCIONES = cargar_funciones([
     '_cerrar_confirmacion_por_x', '_cerrar_alerta_por_x',
     '_cerrar_candidatos_por_x', '_cerrar_discrepancias_por_x',
     '_cerrar_planilla_por_x', '_cerrar_examenes_por_x',
-    '_cerrar_administracion_por_x', '_cerrar_alta_usuario_login',
+    '_cerrar_administracion_por_x', '_cerrar_trazabilidad_por_x', '_cerrar_alta_usuario_login',
+    '_cancelar_cambio_area',
 ], constantes=('SECCIONES_DOCUMENTO_MAESTRAS',))
 
 
@@ -48,10 +49,12 @@ class StreamlitFalso:
 
 
 class TestCierreDeDialogos(unittest.TestCase):
-    def test_los_seis_dialogos_restantes_tienen_callback_de_cierre(self):
+    def test_los_nueve_dialogos_tienen_callback_de_cierre(self):
         decoradores = re.findall(r'@st\.dialog\((.*)\)', ORIGEN)
-        self.assertEqual(len(decoradores), 7)
-        self.assertTrue(all('on_dismiss=_cerrar_' in x for x in decoradores))
+        self.assertEqual(len(decoradores), 9)
+        self.assertTrue(all('on_dismiss=_cerrar_' in x or
+                            'on_dismiss=_cancelar_cambio_area' in x
+                            for x in decoradores))
 
     def test_cierre_del_dialogo_no_reabre_el_modal(self):
         estados = [
@@ -62,7 +65,9 @@ class TestCierreDeDialogos(unittest.TestCase):
             ('_cerrar_planilla_por_x', 'modal_confirmar_planilla_abierto', True),
             ('_cerrar_examenes_por_x', 'mostrar_modal_examenes', True),
             ('_cerrar_administracion_por_x', 'modal_admin_usuarios_abierto', True),
+            ('_cerrar_trazabilidad_por_x', 'trazabilidad_pantalla_completa', 'modificaciones'),
             ('_cerrar_alta_usuario_login', 'alta_usuario_login_abierta', True),
+            ('_cancelar_cambio_area', 'cambio_area_pendiente', {'destino': 'Derivados'}),
         ]
         for funcion, clave, valor in estados:
             with self.subTest(funcion=funcion):

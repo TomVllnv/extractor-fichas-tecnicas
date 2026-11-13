@@ -20,6 +20,7 @@ TREE = ast.parse((ROOT / 'app.py').read_text(encoding='utf-8'))
 
 def _funciones():
     names = {'conservar_fichas_al_reconstruir_hematologia', 'ajustar_alto_fila_con_listas',
+             'ajustar_ancho_columnas',
              'buscar_hoja_por_examen', 'aplicar_ediciones_a_excel',
              'texto_normas_con_negritas', 'aplicar_formato_normas_excel'}
     nodes = [node for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name in names]

@@ -23,10 +23,10 @@ class TestConfirmacionUI(unittest.TestCase):
 
     def test_sidebar_solicita_cambio_y_no_guarda_directamente(self):
         sidebar = APP.split('# --- SIDEBAR ---',1)[1].split('# --- VISTA PRINCIPAL ---',1)[0]
-        for tipo in ('"area"', '"acreditacion"', '"cartera"', '"manual"', '"normas"'):
+        for tipo in ('"area"', '"acreditacion"', '"cartera"', '"normas"'):
             self.assertIn('solicitar_cambio(' + tipo, sidebar)
         for nombre in ('guardar_plantilla_area_db(', 'guardar_cartera_db(',
-                       'fd.guardar_normas(', 'fd.guardar_manual_toma(', 'fd.guardar_cartera_acreditacion('):
+                       'fd.guardar_normas(', 'fd.guardar_cartera_acreditacion('):
             self.assertNotIn(nombre, sidebar)
 
     def test_editor_de_examenes_catalogos_y_ficha_generada_protegidos(self):
@@ -40,13 +40,13 @@ class TestConfirmacionUI(unittest.TestCase):
         self.assertIn('with st.expander("Acceso", expanded=False)', APP)
         self.assertIn('gp.rol_usuario(DB_PATH, st.session_state.get("usuario_acceso"))', APP)
         self.assertIn('if rol_actual == "administrador":', APP)
-        self.assertIn('@st.dialog("Administración de usuarios", on_dismiss=_cerrar_administracion_por_x)', APP)
+        self.assertIn('@st.dialog("Administración de usuarios", width="large", on_dismiss=_cerrar_administracion_por_x)', APP)
         self.assertIn('gp.es_administrador(DB_PATH, actor)', APP)
         self.assertIn('gp.administrar_cuenta(', APP)
-        self.assertIn('st.header("Trazabilidad")', APP)
-        self.assertLess(APP.index('st.header("Base de datos (SQLite)")'),
-                        APP.index('st.header("Trazabilidad")'))
-        self.assertLess(APP.index('st.header("Trazabilidad")'),
+        self.assertIn('st.header("Trazabilidad", anchor=False)', APP)
+        self.assertLess(APP.index('st.header("Base de datos", anchor=False)'),
+                        APP.index('st.header("Trazabilidad", anchor=False)'))
+        self.assertLess(APP.index('st.header("Trazabilidad", anchor=False)'),
                         APP.index('with st.expander("Historial de modificaciones"'))
 
     def test_usa_disco_configurable_y_historial(self):

@@ -70,7 +70,7 @@ class TestAparienciaSolicitada(unittest.TestCase):
 
     def test_normas_no_tiene_subtitulo_repetido(self):
         self.assertNotIn('st.caption("Normas generales de toma de muestras")', self.codigo)
-        self.assertIn('with tab_normas:', self.codigo)
+        self.assertIn('with st.expander("Normas generales de toma de muestras", expanded=False):', self.codigo)
 
     def test_etiqueta_vinculada_y_alternativas_persistentes(self):
         self.assertIn('Vinculada: **{seleccion_manual_cartera}**', self.codigo)

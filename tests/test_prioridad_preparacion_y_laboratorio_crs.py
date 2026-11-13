@@ -47,18 +47,70 @@ class PrioridadPreparacionTest(unittest.TestCase):
                                                         indicaciones_cartera='Ayuno de 12 horas')
         self.assertEqual(vals['Preparación del paciente'], 'Ayuno de 12 horas')
         self.assertEqual(origen['Preparación del paciente'], 'Cartera de Exámenes del CRS · Indicaciones')
-        self.assertEqual(vals['Rotulación'], 'No aplica')  # No aplica continúa válido en otros campos.
+        self.assertEqual(vals['Rotulación'], 'Rotulación general')  # Normas tiene prioridad en este campo.
 
     def test_acreditacion_prioriza_normas_si_crs_vacio(self):
         vals, origen, _, _ = fd.obtener_valores_fuentes(self.db,'GLUCOSA','Bioquímica')
         self.assertEqual(vals['Preparación del paciente'], 'Ayuno de 8 horas')
         self.assertTrue(origen['Preparación del paciente'].startswith('Cartera de Acreditación'))
 
-    def test_no_aplica_acreditacion_usa_normas(self):
+    def test_no_aplica_acreditacion_es_un_valor_documentado_prioritario(self):
+        for contenido in ('No aplica', 'No aplicable', 'N/A', 'NA', '  no APLICA.  '):
+            with self.subTest(contenido=contenido):
+                self._set_preparacion_acreditacion(contenido)
+                vals, origen, _, _ = fd.obtener_valores_fuentes(self.db,'GLUCOSA','Bioquímica')
+                self.assertEqual(vals['Preparación del paciente'], contenido)
+                self.assertTrue(origen['Preparación del paciente'].startswith('Cartera de Acreditación'))
+
+    def test_no_aplica_con_estado_incompleto_no_sustituye_normas(self):
+        for estado in ('Pendiente', 'Incompleto', 'No encontrado', 'Sin documentar'):
+            with self.subTest(estado=estado):
+                self._set_preparacion_acreditacion('No aplica', estado)
+                vals, origen, _, _ = fd.obtener_valores_fuentes(self.db,'GLUCOSA','Bioquímica')
+                self.assertEqual(vals['Preparación del paciente'], 'Recomendación general de Normas')
+                self.assertEqual(origen['Preparación del paciente'], 'Normas Generales de Toma de Muestras')
+
+    def test_no_aplica_en_normas_sigue_descartandose_sin_acreditacion(self):
+        with sqlite3.connect(self.db) as con:
+            con.execute('UPDATE normas_generales_campos SET contenido=? WHERE campo=?',
+                        ('No aplica', 'Preparación del paciente'))
+        self._set_preparacion_acreditacion('Pendiente', 'Pendiente')
+        vals, origen, _, _ = fd.obtener_valores_fuentes(self.db, 'GLUCOSA', 'Bioquímica')
+        self.assertNotIn('Preparación del paciente', vals)
+        self.assertNotIn('Preparación del paciente', origen)
+
+    def test_no_aplica_acreditacion_no_desplaza_indicaciones_crs(self):
+        self._set_preparacion_acreditacion('No aplica', 'Heredado')
+        vals, origen, _, _ = fd.obtener_valores_fuentes(
+            self.db, 'GLUCOSA', 'Bioquímica', indicaciones_cartera='Ayuno 8 horas')
+        self.assertEqual(vals['Preparación del paciente'], 'Ayuno 8 horas')
+        self.assertEqual(origen['Preparación del paciente'], 'Cartera de Exámenes del CRS · Indicaciones')
+
+    def test_no_aplica_acreditacion_no_altera_prioridad_rotulacion(self):
         self._set_preparacion_acreditacion('No aplica')
-        vals, origen, _, _ = fd.obtener_valores_fuentes(self.db,'GLUCOSA','Bioquímica')
-        self.assertEqual(vals['Preparación del paciente'], 'Recomendación general de Normas')
-        self.assertIn('Normas',origen['Preparación del paciente'])
+        vals, origen, _, _ = fd.obtener_valores_fuentes(self.db, 'GLUCOSA', 'Bioquímica')
+        self.assertEqual(vals['Rotulación'], 'Rotulación general')
+        self.assertEqual(origen['Rotulación'], 'Normas Generales de Toma de Muestras')
+
+    def test_no_aplica_importado_desde_encabezado_real_del_excel(self):
+        libro = Workbook()
+        hoja = libro.active
+        hoja.title = 'Cartera_Completa'
+        encabezados = ['ID', 'Código', 'Prestación', 'Área']
+        for nombre_columna in fd.MAPA_ACREDITACION.values():
+            encabezados.extend([nombre_columna, nombre_columna.replace('· texto', '· estado')])
+        hoja.append(encabezados)
+        datos_fila = ['1', 'LAB01', 'GLUCOSA', 'Bioquímica']
+        for campo in fd.MAPA_ACREDITACION:
+            datos_fila.extend(['No aplica' if campo == 'Preparación del paciente' else '',
+                               'Específico'])
+        hoja.append(datos_fila)
+        memoria = io.BytesIO()
+        libro.save(memoria)
+        self.assertEqual(fd.guardar_cartera_acreditacion(self.db, memoria.getvalue(), 'cartera.xlsx'), 1)
+        vals, origen, _, _ = fd.obtener_valores_fuentes(self.db, 'GLUCOSA', 'Bioquímica')
+        self.assertEqual(vals['Preparación del paciente'], 'No aplica')
+        self.assertTrue(origen['Preparación del paciente'].startswith('Cartera de Acreditación'))
 
     def test_pendiente_acreditacion_usa_normas(self):
         self._set_preparacion_acreditacion('Pendiente incorporar la instrucción específica del centro de derivación. '
@@ -110,7 +162,7 @@ class PrioridadPreparacionTest(unittest.TestCase):
         self.assertEqual(vals['Preparación del paciente'], 'Recomendación general de Normas')
 
     def test_crs_no_aplica_es_contenido_del_primer_documento(self):
-        # La excepción «No aplica» se solicitó solo para Acreditación.
+        # Indicaciones CRS mantiene su máxima prioridad, incluso con «No aplica».
         vals, origen, _, _ = fd.obtener_valores_fuentes(self.db,'GLUCOSA','Bioquímica',
                                                         indicaciones_cartera='No aplica')
         self.assertEqual(vals['Preparación del paciente'], 'No aplica')

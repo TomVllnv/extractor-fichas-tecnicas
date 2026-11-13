@@ -22,7 +22,8 @@ class AltaDesdeLoginTest(unittest.TestCase):
         self.revision = gp.estado_recurso(self.db, 'usuarios:administracion')['revision']
 
     def autorizar(self):
-        ticket = rul.verificar_administrador(self.db, 'admin', 'ClaveSeguraInicial2026!')
+        ticket = rul.verificar_administrador(self.db, 'ADMIN', 'ClaveSeguraInicial2026!')
+        self.assertIsNone(rul.verificar_administrador(self.db, 'admin', 'ClaveSeguraInicial2026!'))
         self.assertIsNotNone(ticket)
         return ticket
 

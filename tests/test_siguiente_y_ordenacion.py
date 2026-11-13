@@ -26,7 +26,12 @@ class TestOrdenYAvance(unittest.TestCase):
         self.assertEqual(clave("ÁCIDO")[0], clave("ACIDO")[0])
 
     def test_derivados_indice_no_al_final(self):
+        if not (ROOT / "base_de_datos.db").is_file():
+            self.skipTest("La base institucional no forma parte del ZIP.")
         with sqlite3.connect(ROOT / "base_de_datos.db") as con:
+            tablas = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "examenes_area" not in tablas:
+                self.skipTest("Faltan tablas de la base institucional de pruebas.")
             nombres = [fila[0] for fila in con.execute("SELECT nombre_examen FROM examenes_area WHERE area='Derivados'")]
         orden = sorted(nombres, key=obtener_clave())
         indice = orden.index("ÍNDICE ANDROGENICO LIBRE")

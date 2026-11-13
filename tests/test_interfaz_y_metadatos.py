@@ -132,32 +132,25 @@ class TestInterfazYMetadatos(unittest.TestCase):
         self.assertIn('formatear_fecha_fuente(meta_acr', APP_SOURCE)
         self.assertNotIn("['fecha_actualizacion'][:16].replace('T',' ')", APP_SOURCE)
 
-    def test_normas_como_subcategoria_del_manual(self):
-        """La única entrada principal es Manual, con dos fuentes editables por separado."""
-        inicio = APP_SOURCE.index('with st.expander("Manual de toma de muestras", expanded=False):')
-        fin = APP_SOURCE.index('    st.divider()\n    if st.button("Cerrar sesión"):', inicio)
+    def test_normas_independientes_sin_manual(self):
+        """Normas generales continúa editable sin el Manual retirado."""
+        inicio = APP_SOURCE.index('with st.expander("Normas generales de toma de muestras", expanded=False):')
+        fin = APP_SOURCE.index('    st.header("Trazabilidad", anchor=False)', inicio)
         bloque = APP_SOURCE[inicio:fin]
-        self.assertNotIn('st.expander("Normas generales de toma de muestras"', APP_SOURCE)
-        self.assertIn('tab_manual, tab_normas = st.tabs(["Manual", "Normas generales"])', bloque)
-        self.assertIn('with tab_manual:', bloque)
-        self.assertIn('with tab_normas:', bloque)
-        bloque_manual = bloque.split('with tab_manual:', 1)[1].split('with tab_normas:', 1)[0]
-        bloque_normas = bloque.split('with tab_normas:', 1)[1]
+        self.assertNotIn('st.expander("Manual de toma de muestras"', APP_SOURCE)
+        self.assertNotIn('tab_manual, tab_normas', APP_SOURCE)
         for nombre in ('descargar_manual_toma_original', 'actualizar_manual_toma_archivo',
                        'guardar_manual_toma_nuevo', 'solicitar_cambio("manual"'):
-            self.assertIn(nombre, bloque_manual)
-            self.assertNotIn(nombre, bloque_normas)
+            self.assertNotIn(nombre, APP_SOURCE)
         for nombre in ('descargar_normas_original', 'actualizar_normas_archivo',
                        'guardar_normas_nuevas', 'solicitar_cambio("normas"'):
-            self.assertIn(nombre, bloque_normas)
-            self.assertNotIn(nombre, bloque_manual)
-        self.assertIn("meta_normas['nombre_archivo']", bloque_normas)
-        self.assertIn("meta_manual['nombre_archivo']", bloque_manual)
+            self.assertIn(nombre, bloque)
+        self.assertIn("meta_normas['nombre_archivo']", bloque)
 
     def test_carteras_agrupadas_en_orden_alfabetico_y_descargas_formato_oracion(self):
         """Dos grupos principales, pestañas alfabéticas y botones de descarga con formato oración."""
         inicio = APP_SOURCE.index('with st.expander("Cartera de exámenes y acreditación", expanded=cartera_expirada):')
-        fin = APP_SOURCE.index('with st.expander("Manual de toma de muestras", expanded=False):', inicio)
+        fin = APP_SOURCE.index('with st.expander("Normas generales de toma de muestras", expanded=False):', inicio)
         bloque = APP_SOURCE[inicio:fin]
         self.assertIn('tab_acreditacion, tab_examenes = st.tabs(["Acreditación", "Exámenes"])', bloque)
         self.assertIn('with tab_acreditacion:', bloque)
@@ -174,13 +167,12 @@ class TestInterfazYMetadatos(unittest.TestCase):
         for k in ('dl_cartera_btn', 'cartera_uploader_sidebar', 'btn_save_cartera'):
             self.assertIn(k, examenes)
             self.assertNotIn(k, acreditacion)
-        self.assertIn('tab_manual, tab_normas = st.tabs(["Manual", "Normas generales"])', APP_SOURCE)
+        self.assertIn('with st.expander("Normas generales de toma de muestras", expanded=False):', APP_SOURCE)
         # Solo las etiquetas de los botones de descarga, no el nombre real del archivo.
         arbol = ast.parse(APP_SOURCE)
         esperados = {
             'descargar_acreditacion_original': 'Descargar cartera de acreditación original',
             'dl_cartera_btn': 'Descargar cartera de exámenes',
-            'descargar_manual_toma_original': 'Descargar manual de toma de muestras original',
             'descargar_normas_original': 'Descargar documento original de normas',
         }
         encontrados = set()
@@ -203,18 +195,18 @@ class TestInterfazYMetadatos(unittest.TestCase):
 
     def test_orden_base_datos_areas_antes_de_fuentes_documentales(self):
         """No alterar el orden de las áreas ni el contenido de las pestañas."""
-        inicio_db = APP_SOURCE.index('    st.header("Base de datos (SQLite)")')
+        inicio_db = APP_SOURCE.index('    st.header("Base de datos", anchor=False)')
         area = APP_SOURCE.index('    for area_item in AREA_CONFIG:', inicio_db)
         cartera = APP_SOURCE.index('with st.expander("Cartera de exámenes y acreditación", expanded=cartera_expirada):', inicio_db)
-        manual = APP_SOURCE.index('with st.expander("Manual de toma de muestras", expanded=False):', inicio_db)
+        normas = APP_SOURCE.index('with st.expander("Normas generales de toma de muestras", expanded=False):', inicio_db)
         salida = APP_SOURCE.index('    if st.button("Cerrar sesión"):', inicio_db)
         self.assertLess(inicio_db, area)
         self.assertLess(area, cartera)
-        self.assertLess(cartera, manual)
-        self.assertLess(manual, salida)
+        self.assertLess(cartera, normas)
+        self.assertLess(normas, salida)
         self.assertIn('for area_item in AREA_CONFIG:', APP_SOURCE[area:cartera])
-        self.assertIn('tab_acreditacion, tab_examenes = st.tabs(["Acreditación", "Exámenes"])', APP_SOURCE[cartera:manual])
-        self.assertIn('tab_manual, tab_normas = st.tabs(["Manual", "Normas generales"])', APP_SOURCE[manual:salida])
+        self.assertIn('tab_acreditacion, tab_examenes = st.tabs(["Acreditación", "Exámenes"])', APP_SOURCE[cartera:normas])
+        self.assertIn('descargar_normas_original', APP_SOURCE[normas:salida])
 
     def test_administrar_encargados_sin_pestana_duplicada(self):
         """Se conserva una lista compartida para los dos campos de la ficha."""

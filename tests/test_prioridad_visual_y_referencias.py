@@ -26,9 +26,9 @@ class TestPrioridadVisualYReferencias(unittest.TestCase):
     def test_todos_los_campos_controlados_tienen_prioridad(self):
         self.assertEqual(set(fd.PRIORIDAD_FUENTES_POR_CAMPO), set(fd.CAMPOS_CONTROLADOS))
         self.assertEqual(fd.PRIORIDAD_FUENTES_POR_CAMPO['Recepción de muestras'],
-                         ('Manual de toma de muestras',))
+                         ())
         self.assertEqual(fd.PRIORIDAD_FUENTES_POR_CAMPO['Rotulación'],
-                         ('Cartera de acreditación', 'Normas Generales de Toma de Muestras'))
+                         ('Normas Generales de Toma de Muestras', 'Cartera de acreditación'))
 
     def test_referencias_no_reinicia_contenedor_tras_aplicar(self):
         self.assertIn('key="contenedor_referencias"', APP)
@@ -36,7 +36,7 @@ class TestPrioridadVisualYReferencias(unittest.TestCase):
         fragmento = APP[pos:pos+180]
         self.assertNotIn('st.session_state["generacion_panel_referencias"]', fragmento)
         self.assertIn('st.rerun()', fragmento)
-        self.assertIn('with st.expander("Referencias bibliográficas", expanded=False)', APP)
+        self.assertIn('with st.expander("Referencias bibliográficas", expanded=True)', APP)
 
 
 if __name__ == '__main__':

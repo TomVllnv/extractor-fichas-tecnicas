@@ -9,7 +9,8 @@ ARBOL = ast.parse(TEXTO)
 
 
 def funciones_aisladas():
-    nombres = {'reiniciar_trabajo_por_cambio_area', 'seleccionar_area'}
+    nombres = {'reiniciar_trabajo_por_cambio_area', 'seleccionar_area',
+               'progreso_pendiente_cambio_area'}
     asignaciones = {'CLAVES_TRABAJO_AREA', 'AREA_CONFIG'}
     nodos = []
     for nodo in ARBOL.body:
@@ -67,6 +68,14 @@ class TestReinicioArea(unittest.TestCase):
 
     def test_cambiar_area_limpia_todo_el_trabajo_y_mantiene_usuario(self):
         self.f['seleccionar_area']('Microbiología')
+        # Los campos previamente completados impiden borrar sin confirmación.
+        self.assertEqual(self.estado['area_activa'], 'Hematología y coagulación')
+        self.assertEqual(self.estado['cambio_area_pendiente']['destino'], 'Microbiología')
+        self.assertEqual(self.estado['result_bytes'], b'EXCEL_GENERADO')
+        # Simulación de pulsar el botón azul Continuar en el diálogo.
+        self.f['reiniciar_trabajo_por_cambio_area']()
+        self.estado['area_activa'] = 'Microbiología'
+        self.estado.pop('cambio_area_pendiente', None)
         self.assertEqual(self.estado['area_activa'], 'Microbiología')
         self.assertEqual(self.estado['generacion_cargas_area'], 6)
         self.assertEqual(self.estado['aggrid_key_counter'], 4)
@@ -86,6 +95,25 @@ class TestReinicioArea(unittest.TestCase):
         self.assertTrue(self.estado['authenticated'])
         self.assertIn('examenes_por_area', self.estado)
         self.assertEqual(self.estado['revision_sesion'], 8)
+
+    def test_cambio_sin_archivos_ni_campos_es_directo(self):
+        self.estado = {'area_activa': 'Microbiología', 'aggrid_key_counter': 0,
+                       'generacion_cargas_area': 0, 'usuario_acceso': 'ADMIN'}
+        self.f['seleccionar_area'].__globals__['st'] = StreamlitFalso(self.estado)
+        self.f['reiniciar_trabajo_por_cambio_area'].__globals__['st'] = StreamlitFalso(self.estado)
+        self.f['seleccionar_area']('Bioquímica')
+        self.assertEqual(self.estado['area_activa'], 'Bioquímica')
+        self.assertNotIn('cambio_area_pendiente', self.estado)
+
+    def test_pdf_adjunto_pide_confirmacion_aunque_no_haya_campos(self):
+        self.estado['examen_activo'] = None
+        self.estado.pop('data_extracted', None)
+        self.estado.pop('result_bytes', None)
+        self.estado['pdf_uploader_5'] = [object()]
+        self.f['seleccionar_area']('Microbiología')
+        pendiente = self.estado['cambio_area_pendiente']
+        self.assertEqual(self.estado['area_activa'], 'Hematología y coagulación')
+        self.assertTrue(pendiente['archivos'])
 
     def test_pulsar_la_misma_area_no_descarta_trabajo(self):
         inicial = self.estado.copy()

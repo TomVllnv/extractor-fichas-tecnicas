@@ -132,8 +132,9 @@ class AdminRolesTest(unittest.TestCase):
         self.assertEqual(nuevo['rol'],'administrador')
 
     def test_el_admin_ya_creado_esta_disponible_en_la_sesion(self):
-        login=gp.autenticar(self.db,'admin','ClaveSeguraLaboratorio2026!')
+        login=gp.autenticar(self.db,'ADMIN','ClaveSeguraLaboratorio2026!')
         self.assertEqual(login['rol'],'administrador')
+        self.assertIsNone(gp.autenticar(self.db,'admin','ClaveSeguraLaboratorio2026!'))
         self.assertEqual(login['usuario'],'ADMIN')
 
 

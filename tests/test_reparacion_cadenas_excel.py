@@ -127,9 +127,11 @@ class TestCompatibilidadExcelHematologia(unittest.TestCase):
         original = bf.getvalue()
         self.assertEqual(original, ce.normalizar_texto_enriquecido_para_excel(original))
 
-    def test_macro_opcional_tiene_instruccion_solicitada(self):
-        macro = (ROOT / 'AutoajustarColumnas.bas').read_text(encoding='utf-8')
-        self.assertIn('Cells.EntireColumn.AutoFit', macro)
+    def test_ajuste_excel_ahora_es_independiente_de_vba(self):
+        self.assertFalse((ROOT / 'AutoajustarCampos.bas').exists())
+        codigo = (ROOT / 'app.py').read_text(encoding='utf-8')
+        self.assertIn('ajustar_ancho_columnas(ws)', codigo)
+        self.assertIn('ajustar_alto_fila_con_listas(ws, fila)', codigo)
 
 
 if __name__ == '__main__':

@@ -21,7 +21,7 @@ ARBOL = ast.parse(APP)
 def funciones_excel():
     nombres = {'texto_normas_con_negritas', 'aplicar_formato_normas_excel',
                'aplicar_ediciones_a_excel', 'buscar_hoja_por_examen',
-               'ajustar_alto_fila_con_listas', 'limpiar_valor_excel'}
+               'ajustar_alto_fila_con_listas', 'ajustar_ancho_columnas', 'limpiar_valor_excel'}
     seleccion = [n for n in ARBOL.body if isinstance(n, ast.FunctionDef) and n.name in nombres]
     from openpyxl import load_workbook
     import hashlib
