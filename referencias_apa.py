@@ -34,15 +34,67 @@ def _titulo_archivo(nombre: str) -> str:
     return re.sub(r"\s+", " ", titulo.replace("_", " ")).strip() or "Documento sin título identificado"
 
 
+# Detectar fechas DOCUMENTALES, no años mencionados en material clínico,
+# bibliografía ni en nombres de archivo.
+_MESES = (r"enero|febrero|marzo|abril|mayo|junio|julio|agosto|"
+          r"septiembre|setiembre|octubre|noviembre|diciembre")
+_FECHA_TEXTO = (rf"(?:[0-3]?\d\s+de\s+)?(?:{_MESES})\s+(?:de\s+)?"
+                rf"((?:19|20)\d{{2}})\b")
+_FECHA_NUMERICA = (r"(?:[0-3]?\d)[/-](?:[01]?\d)[/-]((?:19|20)\d{2})\b|"
+                  r"\b((?:19|20)\d{2})-[01]?\d-[0-3]?\d\b")
+_SOLO_ANIO = r"((?:19|20)\d{2})\b"
+
+
 def _anio_explicito(texto: str) -> str:
-    for patron in (
-        r"(?i)\b(?:fecha(?:\s+de\s+(?:publicaci[oó]n|emisi[oó]n|revisi[oó]n))?|publicado|vigente\s+desde)\s*:?\s*([0-3]?\d)[/-]([01]?\d)[/-]((?:19|20)\d{2})\b",
-        r"(?i)\b(?:a[nñ]o\s+de\s+publicaci[oó]n|fecha\s+de\s+publicaci[oó]n)\s*:?\s*((?:19|20)\d{2})\b",
-    ):
-        encontrado = re.search(patron, texto)
-        if encontrado:
-            return encontrado.group(encontrado.lastindex)
-    return ""
+    """Año asociado a emisión/publicación o versión, nunca un año aislado.
+
+    Exige contexto en el mismo renglón (o inmediatamente junto a la etiqueta).
+    No acepta fechas de próximas revisiones, vencimientos ni otras fechas
+    clínicas presentes en el cuerpo de un documento.
+    """
+    lineas = str(texto or "").replace("\r", "").splitlines()
+    if not lineas:
+        return ""
+    candidatos = []
+    patron_fecha = re.compile(rf"(?:{_FECHA_TEXTO})|(?:{_FECHA_NUMERICA})|(?:{_SOLO_ANIO})", re.I)
+    for i, linea in enumerate(lineas[:140]):
+        linea = re.sub(r"\s+", " ", linea).strip()
+        if not linea:
+            continue
+        # Ignorar fechas explícitamente ajenas a la edición/publicación.
+        if re.search(r"(?i)(pr[oó]xima|siguiente|futura|programada|vencimiento|"
+                     r"caducidad|expiraci[oó]n|fecha del paciente|fecha de nacimiento)", linea):
+            continue
+        if re.search(r"(?i)\b(?:fecha\s+de\s+)?(?:publicaci[oó]n|emisi[oó]n|"
+                     r"aprobaci[oó]n|elaboraci[oó]n|edici[oó]n|revisi[oó]n|"
+                     r"actualizaci[oó]n|vigencia)\b", linea):
+            prioridad = 3 if re.search(r"(?i)publicaci[oó]n|emisi[oó]n", linea) else 2
+        elif re.search(r"(?i)\bfecha\s*[:\-=]", linea):
+            prioridad = 2
+        elif re.search(r"(?i)\b(?:versi[oó]n|edici[oó]n|rev(?:isi[oó]n)?\.?|v\s*0\d{1,2})\b", linea):
+            prioridad = 1
+        else:
+            continue
+        # Permitir que la fecha siga inmediatamente a un rótulo sin valor.
+        siguiente = lineas[i + 1].strip() if i + 1 < len(lineas) else ""
+        material = linea
+        if (not re.search(r"(?:19|20)\d{2}", material) and siguiente
+                and len(siguiente) < 65 and not re.search(r"(?i)pr[oó]xima|vencimiento", siguiente)):
+            material += " " + siguiente
+        # Un O entre cifras en un año puede ser un cero mal leído. Solo
+        # reparar aquí, después de validar una etiqueta/versión documental.
+        material = re.sub(r"(?<=\d)[oO](?=\d)", "0", material)
+        for m in patron_fecha.finditer(material):
+            # El año aislado solo sirve con rótulo inequívoco.
+            anio = next((grupo for grupo in m.groups() if grupo), "")
+            if not anio:
+                continue
+            if m.group(1) is None and m.group(2) is None and m.group(3) is None:
+                if prioridad < 2:
+                    continue
+            candidatos.append((prioridad, -i, anio))
+            break
+    return max(candidatos, default=(0, 0, ""))[2]
 
 
 def _version_explicita(texto: str) -> str:
@@ -117,7 +169,7 @@ def _datos_roche_pdf(texto: str) -> tuple[str, str, str, str]:
     return autor, anio, datos_editoriales, url
 
 
-def fuente_pdf(nombre: str, datos: bytes, examen: str = "") -> FuenteBibliografica:
+def fuente_pdf(nombre: str, datos: bytes, examen: str = "", texto_reconocido: str = "") -> FuenteBibliografica:
     """Crea una referencia solo para bibliografía; no modifica otros campos."""
     titulo, autor, anio, version, datos_editoriales, url = "", "", "", "", "", ""
     try:
@@ -144,8 +196,13 @@ def fuente_pdf(nombre: str, datos: bytes, examen: str = "") -> FuenteBibliografi
             textos = {i: doc[i].get_text()[:18000] for i in indices}
             primeras_paginas = "\n".join(textos[i] for i in indices if i < 2)[:26000]
             texto_bibliografico = "\n".join(textos.values())[:64000]
-            anio = _anio_explicito(primeras_paginas)
-            version = _version_explicita(primeras_paginas)
+            # El texto óptico ya obtenido de las páginas se reutiliza sin
+            # ejecutar otra lectura; el nombre de archivo jamás da el año.
+            texto_fecha = primeras_paginas
+            if texto_reconocido:
+                texto_fecha = (primeras_paginas + "\n" + texto_reconocido[:26000]).strip()
+            anio = _anio_explicito(texto_fecha)
+            version = _version_explicita(texto_fecha)
             autor_roche, anio_roche, datos_editoriales, url = _datos_roche_pdf(texto_bibliografico)
             if autor_roche:
                 autor = autor_roche
@@ -175,20 +232,22 @@ def fuente_institucional(fuente_id: str, documento: dict) -> FuenteBibliografica
     anio = ""
     autor = ""
     titulo = _titulo_archivo(nombre)
-    # Solo atribuir la institución cuando el propio PDF la identifica.
-    if fuente_id == "manual_toma_muestras" and documento.get("archivo"):
+    # Un año bibliográfico solo proviene del contenido PDF de la institución.
+    archivo = documento.get("archivo")
+    if archivo and bytes(archivo)[:4] == b"%PDF":
         try:
-            with fitz.open(stream=documento["archivo"], filetype="pdf") as pdf:
-                encabezado = " ".join(pdf[i].get_text() for i in range(min(4, len(pdf))))
+            with fitz.open(stream=archivo, filetype="pdf") as pdf:
+                encabezado = "\n".join(pdf[i].get_text() for i in range(min(4, len(pdf))))
                 version = _version_explicita(encabezado)
                 anio = _anio_explicito(encabezado)
-                if re.search(r"CENTRO\s+DE\s+REFERENCIA\s+DE\s+SALUD", encabezado, re.I):
-                    autor = "Centro de Referencia de Salud de Peñalolén Cordillera Oriente"
-                if re.search(r"MANUAL\s+DE\s+TOMA\s+DE\s+MUESTRAS", encabezado, re.I):
-                    titulo = "Manual de toma de muestras laboratorio clínico del Centro de Referencia de Salud de Peñalolén Cordillera Oriente"
-        except (ValueError, RuntimeError):
+                if fuente_id == "manual_toma_muestras":
+                    if re.search(r"CENTRO\s+DE\s+REFERENCIA\s+DE\s+SALUD", encabezado, re.I):
+                        autor = "Centro de Referencia de Salud de Peñalolén Cordillera Oriente"
+                    if re.search(r"MANUAL\s+DE\s+TOMA\s+DE\s+MUESTRAS", encabezado, re.I):
+                        titulo = "Manual de toma de muestras laboratorio clínico del Centro de Referencia de Salud de Peñalolén Cordillera Oriente"
+        except (ValueError, RuntimeError, TypeError):
             pass
-    else:
+    if not version:
         coincidencia = re.search(r"(?i)(?:^|[_\s-])v(\d+(?:\.\d+){1,4})(?:\b|\.)", nombre)
         if coincidencia:
             version = coincidencia.group(1)
