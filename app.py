@@ -19,6 +19,13 @@ import interfaz_fluida as iflu
 import coincidencias_ui as cui
 import historial_tabla as ht
 import cola_fichas as cf
+import manuales_procedimiento as mp
+import procedencia_campos as pc
+import ocr_documentos_escaneados as oe
+import equipamientos as eq
+import revision_valores as rv
+import deteccion_pdf as dp
+import derivados_estructurado as de
 from uuid import uuid4
 
 APP_TITLE = 'Herramienta de extracción de datos para laboratorio'
@@ -33,6 +40,12 @@ AREA_CONFIG = {
     "Hormonas e inmunidad": {"template": None},
     "Derivados": {"template": None},
 }
+
+
+@st.cache_data(show_spinner=False, max_entries=24)
+def previsualizar_tipo_pdf(contenido: bytes):
+    """Identifica PDF escaneado/textual/mixto sin ejecutar el motor OCR."""
+    return dp.inspeccionar_pdf(contenido)
 
 
 def formatear_fecha_fuente(fecha_iso):
@@ -154,25 +167,10 @@ def _imagen_pagina_pdf_cacheada(pdf_bytes: bytes, pagina: int, dpi: int):
 
 
 @st.fragment
-def _visor_pdf_rapido(pdf_activo, modo_conjunto, total_pdfs, pdfs_ordenados, idx_actual):
-    """Las flechas y sliders sólo rerenderizan el visor, no toda Streamlit."""
+def _visor_pdf_rapido(pdf_activo, idx_actual):
+    """Visor aislado por documento de la cola, sin selector de PDF conjunto."""
     try:
-        # La selección de vista previa es independiente del PDF activo
-        # y nunca modifica los documentos que se analizan en conjunto.
         pdf_vista = pdf_activo
-        if modo_conjunto and total_pdfs > 1:
-            opciones_vista = list(range(total_pdfs))
-            indice_vista = st.selectbox(
-                "Documento PDF a visualizar",
-                options=opciones_vista,
-                index=None,
-                placeholder="Selecciona un PDF para la vista previa",
-                format_func=lambda i: f"{i + 1}. {pdfs_ordenados[i].name}",
-                key="pdf_preview_documento_conjunto",
-                help="Selecciona el archivo que deseas revisar. El análisis seguirá incluyendo todos los PDF cargados."
-            )
-            if indice_vista is not None:
-                pdf_vista = pdfs_ordenados[indice_vista]
 
         pdf_bytes_vista = pdf_vista.getvalue()
         num_paginas = _total_paginas_pdf_cacheadas(pdf_bytes_vista)
@@ -184,11 +182,10 @@ def _visor_pdf_rapido(pdf_activo, modo_conjunto, total_pdfs, pdfs_ordenados, idx
 
         # Cada documento conserva su propia página seleccionada.
         # El índice está ligado a la posición en la lista de archivos.
-        indice_pagina = (indice_vista if modo_conjunto and total_pdfs > 1 and indice_vista is not None
-                         else idx_actual)
+        indice_pagina = idx_actual
         # La página se conserva por documento; las flechas y el
         # slider usan exactamente la misma clave de estado.
-        clave_pagina = (f"pdf_page_slider_{'conjunto' if modo_conjunto else 'cola'}_"
+        clave_pagina = (f"pdf_page_slider_cola_"
                         f"{indice_pagina}_{hashlib.sha256(pdf_vista.name.encode('utf-8')).hexdigest()[:12]}")
         with col_prev1:
             pag_seleccionada = st.slider(
@@ -196,7 +193,7 @@ def _visor_pdf_rapido(pdf_activo, modo_conjunto, total_pdfs, pdfs_ordenados, idx
                 key=clave_pagina) if num_paginas > 1 else 1
 
         with col_prev2:
-            magnify_scale = st.slider("Potencia Lupa (x)", min_value=1.0, max_value=3.5, value=1.0, step=0.5, key=f"pdf_magnify_slider_{'conjunto' if modo_conjunto else 'cola'}_{indice_pagina}")
+            magnify_scale = st.slider("Potencia Lupa (x)", min_value=1.0, max_value=3.5, value=1.0, step=0.5, key=f"pdf_magnify_slider_cola_{indice_pagina}")
 
         img_b64, ancho_pixeles, alto_pixeles = _imagen_pagina_pdf_cacheada(
             pdf_bytes_vista, pag_seleccionada - 1, 130)
@@ -818,7 +815,7 @@ def _guardar_catalogo(tabla, nombres):
                     conn.execute(f"UPDATE {tabla} SET activo = 0 WHERE nombre = ?", (nombre,))
         return True
     except sqlite3.Error as exc:
-        st.error(f"No se pudieron guardar los cambios en SQLite: {exc}")
+        st.error(f"No se pudieron guardar los cambios en la base de datos: {exc}")
         return False
 
 
@@ -1460,7 +1457,8 @@ def _limpiar_membrete_ocr_hematologia(texto, numero_pagina):
     return "\n".join(lineas)
 
 
-def extract_pdf_text(uploaded_bytes, filename, examen_activo=None, hematologia=False):
+def extract_pdf_text(uploaded_bytes, filename, examen_activo=None, hematologia=False, progreso=None,
+                     rango_paginas=None, manual_procedimiento=False):
     """Extrae cada página independientemente; usa OCR solo donde falta texto.
 
     Mantiene el contrato anterior: (texto, descripción_del_método).
@@ -1477,9 +1475,19 @@ def extract_pdf_text(uploaded_bytes, filename, examen_activo=None, hematologia=F
 
     pages_text = []
     paginas_ocr = []
+    texto_optico_original = []
+    motores_ocr = set()
     engine = None
     try:
+        desde, hasta = rango_paginas or (1, doc.page_count)
+        desde = max(1, min(int(desde), doc.page_count))
+        hasta = max(desde, min(int(hasta), doc.page_count))
+        paginas_a_analizar = hasta - desde + 1
+        if progreso is not None:
+            progreso(0, paginas_a_analizar, False)
         for numero, page in enumerate(doc, start=1):
+            if not desde <= numero <= hasta:
+                continue
             page_height = page.rect.height
             page_width = page.rect.width
             valid_blocks = []
@@ -1516,21 +1524,27 @@ def extract_pdf_text(uploaded_bytes, filename, examen_activo=None, hematologia=F
             page_text = "\n".join(b[4] for b in valid_blocks)
 
             # Un PDF mixto puede contener páginas con texto y páginas escaneadas.
-            if len(re.sub(r"\s", "", page_text)) < 50:
+            if manual_procedimiento and len(re.sub(r"\s", "", page_text)) < 50:
                 try:
-                    if engine is None:
-                        from rapidocr_onnxruntime import RapidOCR
-                        import numpy as np
-                        from PIL import Image
-                        engine = RapidOCR()
-                    pix = page.get_pixmap(dpi=200)
-                    image = Image.open(io.BytesIO(pix.tobytes("png")))
-                    result, _ = engine(np.array(image))
-                    ocr_text = "\n".join(str(line[1]) for line in (result or []) if len(line) > 1)
+                    import numpy as np
+                    # En documentos escaneados usar 160 dpi para reducir la
+                    # rasterización. Evitar codificar y decodificar PNG en
+                    # memoria: RapidOCR acepta directamente matrices RGB.
+                    pix = page.get_pixmap(dpi=160 if manual_procedimiento else 200,
+                                          alpha=False, colorspace=fitz.csRGB)
+                    imagen_rgb = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                        pix.height, pix.width, pix.n)
+                    # Solo «Documentos escaneados» usa motores OCR.
+                    ocr_text, motor_ocr = oe.leer_pagina_escaneada(
+                        imagen_rgb, motor_rapid=engine)
                     if len(re.sub(r"\s", "", ocr_text)) > len(re.sub(r"\s", "", page_text)):
-                        page_text = (_limpiar_membrete_ocr_hematologia(ocr_text, numero)
-                                     if hematologia else ocr_text)
+                        # Guardar exactamente lo reconocido antes de corregir
+                        # palabras inequívocas; no alterar números ni modelos.
+                        texto_optico_original.append((numero, ocr_text))
+                        import lenguaje_ocr
+                        page_text = lenguaje_ocr.corregir_texto_lectura_optica(ocr_text)
                         paginas_ocr.append(numero)
+                        motores_ocr.add(motor_ocr)
                 except ImportError:
                     # Mantener texto digital disponible; si todo es imagen, informar.
                     pass
@@ -1539,13 +1553,23 @@ def extract_pdf_text(uploaded_bytes, filename, examen_activo=None, hematologia=F
                     import logging
                     logging.getLogger(__name__).warning("OCR falló en página %s: %s", numero, exc)
             pages_text.append(page_text)
+            if progreso is not None:
+                progreso(numero - desde + 1, paginas_a_analizar, numero in paginas_ocr)
     finally:
         doc.close()
 
     text = "\n\n".join(pages_text).strip()
+    if manual_procedimiento and "st" in globals():
+        st.session_state["texto_optico_original"] = {
+            "archivo": filename, "paginas": tuple(texto_optico_original),
+        }
     if len(re.sub(r"\s", "", text)) < 10:
-        raise RuntimeError("No se detectó texto legible. Comprueba la calidad del PDF y que RapidOCR esté instalado.")
-    method = "PyMuPDF + RapidOCR (páginas: " + ", ".join(map(str, paginas_ocr)) + ")" if paginas_ocr else "PyMuPDF (Columna por Columna)"
+        raise RuntimeError("No se detectó texto seleccionable. Si el PDF está escaneado, elige «Documentos escaneados» para utilizar lectura óptica.")
+    if paginas_ocr:
+        tipo_ocr = "/".join(sorted(motores_ocr)) if manual_procedimiento else "RapidOCR"
+        method = "PyMuPDF + " + tipo_ocr + " (páginas: " + ", ".join(map(str, paginas_ocr)) + ")"
+    else:
+        method = "PyMuPDF (Columna por Columna)"
     return text, method
 
 
@@ -1808,14 +1832,18 @@ def parse_labeled_text(text, field_aliases=None, examen_activo=None):
 
 
 def infer_name_code(text, data):
-    equipos_encontrados = re.findall(r'\bcobas\s+(?:[a-zA-Z]\s*)?\d{3,4}\b|\bcobas\s+(?:pure|pro)\b', text, flags=re.I)
+    equipos_encontrados = re.findall(r'\bcobas[\s-]*(?:[a-zA-Z]\s*-?\s*)?\d{3,4}\b|\bcobas\s+(?:pure|pro)\b', text, flags=re.I)
     if equipos_encontrados and not data.get('Equipamiento utilizado'):
         equipos_limpios = []
         for eq in equipos_encontrados:
             eq_norm = re.sub(r'\s+', ' ', eq).strip()
-            if eq_norm.casefold() not in [x.casefold() for x in equipos_limpios]:
+            if eq.clave_equipo(eq_norm) not in [eq.clave_equipo(x) for x in equipos_limpios]:
                 equipos_limpios.append(eq_norm)
         data['Equipamiento utilizado'] = "\n".join(equipos_limpios)
+
+    if data.get('Equipamiento utilizado'):
+        data['Equipamiento utilizado'] = eq.deduplicar_equipamiento(
+            data['Equipamiento utilizado'])
 
     if not data.get('Método de procesamiento'):
         patrones_metodo = [
@@ -1879,7 +1907,8 @@ def crear_hoja_examen(wb, nombre_examen, field_aliases=None):
     return ws
 
 
-def consolidar_documentos_pdf(documentos, field_aliases, nombre_examen):
+def consolidar_documentos_pdf(documentos, field_aliases, nombre_examen,
+                             manual_procedimiento=False):
     """Extrae cada PDF por separado y completa únicamente los campos vacíos.
 
     Las diferencias entre valores no se resuelven automáticamente: se devuelven
@@ -1894,19 +1923,34 @@ def consolidar_documentos_pdf(documentos, field_aliases, nombre_examen):
     metodos = []
     for nombre, contenido in documentos:
         texto, metodo = extract_pdf_text(contenido, nombre, nombre_examen,
-                                          hematologia=es_alias_hematologia(field_aliases))
-        encontrados = infer_name_code(texto, parse_labeled_text(texto, field_aliases, nombre_examen))
-        encontrados = {campo: val for campo, val in encontrados.items() if campo not in fd.CAMPOS_CONTROLADOS}
+                                          hematologia=es_alias_hematologia(field_aliases),
+                                          manual_procedimiento=manual_procedimiento)
+        encontrados = (mp.extraer_campos_manual(texto) if manual_procedimiento else
+                       mp.completar_homologos_manual_digital(
+                           texto, infer_name_code(
+                               texto, parse_labeled_text(texto, field_aliases, nombre_examen))))
+        if (field_aliases is globals().get("FIELD_ALIASES_DERIVADOS") or field_aliases == globals().get("FIELD_ALIASES_DERIVADOS")):
+            encontrados.update(de.extraer_ficha_derivados(texto, contenido))
+        permitidos_manual = (set(fd.CAMPOS_CONTROLADOS) if
+                             (manual_procedimiento or (field_aliases is globals().get("FIELD_ALIASES_DERIVADOS") or field_aliases == globals().get("FIELD_ALIASES_DERIVADOS"))) else
+                             {'Muestra requerida y recipiente', 'Procesamiento de muestras'}
+                             if mp.es_manual_de_procedimiento_textual(texto) else set())
+        encontrados = {campo: val for campo, val in encontrados.items()
+                       if campo not in fd.CAMPOS_CONTROLADOS or campo in permitidos_manual}
         textos.append(f"===== {nombre} =====\n{texto}")
         metodos.append(f"{nombre}: {metodo}")
         for campo, valor in encontrados.items():
             valor = str(valor or "").strip()
+            if campo == "Equipamiento utilizado":
+                valor = eq.deduplicar_equipamiento(valor)
             if not valor or valor.casefold() in ("nan", "none", "null"):
                 continue
             if not str(datos.get(campo, "")).strip():
                 datos[campo] = valor
                 fuentes[campo] = nombre
-            elif norm(str(datos[campo])) != norm(valor) and valor != str(datos[campo]):
+            elif (not eq.equipamientos_equivalentes(datos[campo], valor)
+                  if campo == "Equipamiento utilizado"
+                  else norm(str(datos[campo])) != norm(valor) and valor != str(datos[campo])):
                 opciones = discrepancias.setdefault(campo, [(fuentes[campo], str(datos[campo]))])
                 if (nombre, valor) not in opciones:
                     opciones.append((nombre, valor))
@@ -1914,7 +1958,11 @@ def consolidar_documentos_pdf(documentos, field_aliases, nombre_examen):
 
 
 def process(uploaded_bytes, filename, template_bytes, centro='', nombre_examen='', field_aliases=None,
-            actualizado_por='', autorizado_por='', datos_sobrescribir=None, documentos_adicionales=None):
+            actualizado_por='', autorizado_por='', datos_sobrescribir=None, documentos_adicionales=None,
+            datos_pdf_preextraidos=None, manual_procedimiento=False):
+    # Importación local: process también se ejecuta de manera aislada en las
+    # comprobaciones y reutiliza el módulo ya cargado por la aplicación.
+    import manuales_procedimiento as mp
     if field_aliases is None:
         field_aliases = FIELD_ALIASES_BASE
     if not nombre_examen:
@@ -1923,18 +1971,49 @@ def process(uploaded_bytes, filename, template_bytes, centro='', nombre_examen='
     if not ok:
         raise ValueError(mensaje)
 
-    if documentos_adicionales:
+    # La interfaz ya leyó los PDF para detectar discrepancias y fuentes.
+    # Reutilizar sus resultados evita ejecutar OCR por duplicado en documentos
+    # escaneados (en particular, manuales con numerosas páginas).
+    if datos_pdf_preextraidos is not None:
+        data, text, method = datos_pdf_preextraidos
+        data = dict(data)  # No modificar el resultado original de la revisión.
+    elif documentos_adicionales:
         data, _, _, text, method = consolidar_documentos_pdf(
-            [(filename, uploaded_bytes)] + documentos_adicionales, field_aliases, nombre_examen
+            [(filename, uploaded_bytes)] + documentos_adicionales, field_aliases, nombre_examen,
+            manual_procedimiento=manual_procedimiento
         )
     else:
         text, method = extract_pdf_text(uploaded_bytes, filename, nombre_examen,
-                                        hematologia=es_alias_hematologia(field_aliases))
-        data = infer_name_code(text, parse_labeled_text(text, field_aliases, nombre_examen))
+                                        hematologia=es_alias_hematologia(field_aliases),
+                                        manual_procedimiento=manual_procedimiento)
+        data = (mp.extraer_campos_manual(text) if manual_procedimiento else
+                mp.completar_homologos_manual_digital(
+                    text, infer_name_code(
+                        text, parse_labeled_text(text, field_aliases, nombre_examen))))
 
-    # Los seis campos documentales admitidos se obtienen de fuentes SQLite;
-    # Recepción y Procesamiento no se toman de ninguna fuente ni del PDF.
-    data = {campo: val for campo, val in data.items() if campo not in fd.CAMPOS_CONTROLADOS}
+    if (field_aliases is globals().get("FIELD_ALIASES_DERIVADOS") or field_aliases == globals().get("FIELD_ALIASES_DERIVADOS")) and datos_pdf_preextraidos is None:
+        data.update(de.extraer_ficha_derivados(text, uploaded_bytes))
+
+    # Ningún OCR ni extractor técnico rellena «Referencias» automáticamente.
+    # Su aplicación es exclusivamente una acción explícita del usuario.
+    data.pop("Referencias", None)
+    # Las Carteras y Normas mantienen su prioridad. Recepción y Procesamiento
+    # solo se admiten desde MANUALES DE PROCEDIMIENTO explícitamente seleccionados.
+    manual_digital = (not manual_procedimiento and
+                      mp.es_manual_de_procedimiento_textual(text))
+    if manual_digital:
+        data = mp.completar_homologos_manual_digital(text, data)
+    manuales_permitidos = (set(fd.CAMPOS_CONTROLADOS) if
+                          (manual_procedimiento or (field_aliases is globals().get("FIELD_ALIASES_DERIVADOS") or field_aliases == globals().get("FIELD_ALIASES_DERIVADOS"))) else
+                          {'Muestra requerida y recipiente', 'Procesamiento de muestras'}
+                          if manual_digital else set())
+    data = {campo: val for campo, val in data.items()
+            if campo not in fd.CAMPOS_CONTROLADOS or campo in manuales_permitidos}
+    # Los campos entregados por el PDF son una propuesta, no una orden de
+    # sobrescritura: conservar su identidad incluso si el texto fue leído
+    # fuera de este proceso (OCR reutilizado o varios PDF).
+    campos_provenientes_pdf = set(data) if (
+        manual_procedimiento or manual_digital or (field_aliases is globals().get("FIELD_ALIASES_DERIVADOS") or field_aliases == globals().get("FIELD_ALIASES_DERIVADOS"))) else set()
     if datos_sobrescribir:
         for campo, val in datos_sobrescribir.items():
             if val and str(val).strip().casefold() not in ["nan", "none", "null"]:
@@ -1972,9 +2051,29 @@ def process(uploaded_bytes, filename, template_bytes, centro='', nombre_examen='
 
     normalizar_etiquetas_ficha(ws)
 
-    # Evitar datos obsoletos si una ficha anterior ya contenía alguno de estos campos.
+    if manual_procedimiento or manual_digital or (field_aliases is globals().get("FIELD_ALIASES_DERIVADOS") or field_aliases == globals().get("FIELD_ALIASES_DERIVADOS")):
+        # No alterar ningún valor previamente validado en una ficha. Las
+        # fuentes institucionales siguen operando por sus propias reglas.
+        datos_documentales = set((datos_sobrescribir or {}).keys())
+        existentes = {str(ws.cell(r, 1).value or '').strip(): ws.cell(r, 2).value
+                      for r in range(1, ws.max_row + 1)}
+        candidatos_pdf = {campo: valor for campo, valor in data.items()
+                          if campo in campos_provenientes_pdf
+                          and campo not in datos_documentales}
+        # No ocultar hallazgos por existir información antigua. El usuario
+        # decide qué conservar con «Aplicar»; la Cartera seleccionada se compara.
+        data = {campo: valor for campo, valor in data.items()
+                if campo not in campos_provenientes_pdf
+                or campo in datos_documentales}
+        data.update(candidatos_pdf)
+
+    # Fuentes institucionales propuestas para este análisis. Los datos antiguos
+    # permanecen como base de comparación, sin aparecer como recién encontrados.
     for fila in range(1, ws.max_row + 1):
-        if str(ws.cell(fila, 1).value or "").strip() in fd.CAMPOS_CONTROLADOS:
+        etiqueta = str(ws.cell(fila, 1).value or "").strip()
+        # Los campos controlados se calculan en el análisis actual y no deben
+        # trasladarse desde una extracción histórica sin un nuevo origen.
+        if etiqueta in fd.CAMPOS_CONTROLADOS:
             ws.cell(fila, 2).value = None
     updates = apply_to_sheet(ws, data)
 
@@ -1987,7 +2086,14 @@ def process(uploaded_bytes, filename, template_bytes, centro='', nombre_examen='
         ('Fecha actualización', fecha_actual),
     ]:
         if norm(campo) in filas:
-            ws.cell(filas[norm(campo)], 2).value = val
+            celda = ws.cell(filas[norm(campo)], 2)
+            if not (manual_procedimiento and celda.value is not None
+                    and str(celda.value).strip()):
+                celda.value = val
+
+    # La tabla solo recibe resultados de ESTE análisis. Los valores anteriores
+    # permanecen en el libro/plantilla, pero nunca se hacen pasar por extracción.
+    # AG Grid los muestra aparte al desmarcar «Aplicar».
 
     # Las viñetas documentales ya fueron reconstruidas al consultar SQLite.
     # Su formato multilineal nunca debe pasar de nuevo por limpieza genérica.
@@ -2582,7 +2688,7 @@ def guide_tab():
         st.markdown(
             "- Utilizar documentos ficticios o anonimizados durante las pruebas.\n- Compartir resultados solo con personas autorizadas.")
     with st.expander("2. Usuarios, contraseñas y configuración"):
-        st.markdown("- Cada encargado utiliza una cuenta individual configurada por el administrador. No compartas contraseñas ni archivos SQLite de producción.")
+        st.markdown("- Cada encargado utiliza una cuenta individual configurada por el administrador. No compartas contraseñas ni copias de la base de datos.")
     with st.expander("3. Manejo seguro de archivos"):
         st.markdown("- Aceptar solo los tipos de archivo necesarios y validar su contenido.")
     with st.expander("4. Calidad y revisión de datos"):
@@ -2645,6 +2751,18 @@ st.markdown("""
     .sidebar-examen-sin-seleccionar {font-weight:600; line-height:1.55;}
     .sidebar-examen-sin-seleccionar span {color:#ffb45b;}
 
+    /* Solo en el aviso del manual: nombres de campos blancos sobre azul oscuro.
+       El resto de avisos y los colores del modo claro no se modifican. */
+    .st-key-aviso_campos_manual [data-testid="stAlert"] strong {
+        color: #FFFFFF !important;
+        background-color: #245B8A;
+        padding: 1px 5px;
+        border-radius: 4px;
+        font-weight: 700;
+        -webkit-box-decoration-break: clone;
+        box-decoration-break: clone;
+    }
+
     /* Botón de avance: azul, independiente del tema del resto de Streamlit. */
     .st-key-contenedor_continuar_examen button {
         background-color: #2563eb !important;
@@ -2671,7 +2789,7 @@ st.markdown("""
         outline: none !important;
         font-weight: bold;
         font-size: 1rem;
-        color: #FFFFFF !important;
+        color: inherit !important;
         margin-bottom: 5px;
     }
 
@@ -2722,6 +2840,7 @@ st.markdown("""
   .cuaderno-campo { color: #17365D; font-size: 0.96rem; font-weight: 700; }
   .cuaderno-fuente { color: #556479; font-size: 0.84rem; }
   .cuaderno-fuente-seleccionada { color: #17365D; font-weight: 700; }
+  .cuaderno-sin-fuente { color: #b76b71; font-weight: 600; }
   .cuaderno-separador { color: #9ba7b7; margin: 0 0.35rem; }
   .st-key-reinicio_flotante {
       position: fixed !important;
@@ -2952,7 +3071,7 @@ def etiqueta_recurso(recurso):
 def solicitar_cambio(tipo, recurso, archivo=None, nombre_archivo=None, descripcion=None, **datos):
     """La escritura queda pendiente; se realiza SOLO dentro del modal confirmado."""
     if not st.session_state.get("usuario_acceso"):
-        raise PermissionError("Debes iniciar sesión para modificar SQLite.")
+        raise PermissionError("Debes iniciar sesión para modificar la base de datos.")
     previo = gp.estado_recurso(DB_PATH, recurso)
     st.session_state["cambio_pendiente"] = {
         "tipo": tipo, "recurso": recurso, "revision": previo["revision"],
@@ -3149,8 +3268,28 @@ def _conflictos_cartera_actualizados(datos):
         for campo in ("Equipamiento utilizado", "Plazo entrega resultados"):
             pdf = str(datos.get(campo, "") or "").strip()
             cartera = str(info.get(campo, "") or "").strip()
-            if pdf and cartera and pdf.casefold() != cartera.casefold():
-                conflictos[campo] = {"pdf": pdf, "cartera": cartera}
+            diferente = (not eq.equipamientos_equivalentes(pdf, cartera)
+                         if campo == "Equipamiento utilizado" else
+                         pdf.casefold() != cartera.casefold())
+            if pdf and cartera and diferente:
+                conflictos[campo] = {"pdf": pdf, "cartera": cartera,
+                                    "fuente": "Cartera de Exámenes del CRS"}
+    if st.session_state.get("area_resultado") == "Derivados":
+        fuentes_inst = dict(st.session_state.get("procedencia_valores_documentales", {}))
+        origen = st.session_state.get("origen_campos_documentales", {})
+        propuestas = st.session_state.get("pdf_para_cartera", {}) or st.session_state.get(
+            "procedencia_pdf_campos", {})
+        for campo, valor_pdf in propuestas.items():
+            if campo == "Código" or campo in conflictos:
+                continue
+            val_inst = str(fuentes_inst.get(campo, '') or '').strip()
+            if de.son_valores_distintos(campo, valor_pdf, val_inst):
+                fuente = str(origen.get(campo, '') or '').strip()
+                if fuente:
+                    conflictos[campo] = {
+                        "pdf": str(valor_pdf).strip(), "cartera": val_inst,
+                        "fuente": fuente,
+                    }
     return conflictos
 
 
@@ -3269,12 +3408,20 @@ def modal_discrepancias_unificadas():
         else:
             opciones = [
                 ("PDF extraído", detalle["pdf"]),
-                ("Cartera SQLite", detalle["cartera"]),
+                ("Cartera de Exámenes", detalle["cartera"]),
             ]
 
         clave = ("unificado_pdf_" if etapa == "pdf" else "unificado_cartera_") + hashlib.sha256(campo.encode()).hexdigest()[:16]
         if st.session_state.get(clave) not in range(len(opciones)):
-            st.session_state[clave] = 0
+            # En lectura óptica el valor del documento es principal, salvo
+            # Código o una Cartera seleccionada expresamente.
+            es_escaneado_activo = (
+                st.session_state.get("procedencia_modalidad") == "Documentos escaneados")
+            fuente_elegida = campo in st.session_state.get("fuentes_elegidas_usuario", set())
+            st.session_state[clave] = (
+                1 if etapa == "cartera" and (
+                    not es_escaneado_activo or campo == "Código" or fuente_elegida)
+                else 0)
 
         def _seleccionar_discrepancia(k, indice):
             st.session_state[k] = indice
@@ -3287,7 +3434,7 @@ def modal_discrepancias_unificadas():
                 elif indice == 0:
                     titulo = "Valor extraído del PDF:"
                 else:
-                    titulo = "Valor en Cartera SQLite:"
+                    titulo = "Valor de " + str(detalle.get("fuente", "Cartera institucional")) + ":"
                 clave_tarjeta = f"tarjeta_{etapa}_{hashlib.sha256(campo.encode()).hexdigest()[:12]}_{indice}"
                 _boton_valor_discrepancia(
                     titulo, valor, "azul" if indice % 2 == 0 else "verde",
@@ -3309,10 +3456,31 @@ def modal_discrepancias_unificadas():
                     datos[campo] = pdf if eleccion == 0 else cartera
             try:
                 _guardar_resolucion_en_ficha(datos, set(respuestas))
+                if etapa == "cartera":
+                    elegidas = st.session_state.setdefault("fuentes_elegidas_usuario", set())
+                    for campo, eleccion in respuestas.items():
+                        if eleccion == 1:
+                            elegidas.add(campo)
+                            if "Cartera de Exámenes" in diferencias[campo].get("fuente", ""):
+                                # Atribuir a la Cartera el valor que el usuario
+                                # acaba de elegir, aunque Escáner lo propusiera
+                                # inicialmente y la selección fuese posterior.
+                                st.session_state.setdefault("procedencia_cartera_campos", {})[
+                                    campo] = diferencias[campo]["cartera"]
+                                st.session_state["cartera_aporto_campos"] = True
+                        else:
+                            elegidas.discard(campo)
             except Exception as exc:
                 st.error(f"No se pudieron aplicar las selecciones: {exc}")
                 return
             if etapa == "pdf":
+                # Fuente PDF que el usuario acaba de validar: se utilizará
+                # al comparar después con las bases institucionales.
+                propuestas_pdf_resueltas = dict(
+                    st.session_state.get("procedencia_pdf_campos", {}))
+                for campo_pdf, indice_pdf in respuestas.items():
+                    propuestas_pdf_resueltas[campo_pdf] = diferencias[campo_pdf][indice_pdf][1]
+                st.session_state["pdf_para_cartera"] = propuestas_pdf_resueltas
                 st.session_state.pop("discrepancias_pdf", None)
                 # No reutilizar conflictos calculados con valores anteriores.
                 nuevos = _conflictos_cartera_actualizados(datos)
@@ -3347,7 +3515,7 @@ def modal_confirmar_actualizacion_planilla():
             "Los documentos omitidos no se han analizado ni modificado."
         )
     else:
-        st.markdown(f"Estás a punto de reemplazar la **base de datos guardada en SQLite** para el área **{area_activa}** con los datos recién procesados del examen **{examen_activo}**.")
+        st.markdown(f"Estás a punto de reemplazar la **base de datos** para el área **{area_activa}** con los datos recién procesados del examen **{examen_activo}**.")
     st.write("")
 
     col_m1, col_m2, col_m3 = st.columns(3)
@@ -3396,7 +3564,7 @@ def modal_confirmar_actualizacion_planilla():
         st.info("No se detectaron diferencias en los campos. La versión actual y la nueva son idénticas.")
 
     st.write("")
-    st.warning("Esta acción sobreescribirá la Ficha Técnica / Base de Datos del área en SQLite para que los próximos análisis utilicen este nuevo contenido.")
+    st.warning("Esta acción sobreescribirá la Ficha Técnica / Base de Datos del área para que los próximos análisis utilicen este nuevo contenido.")
 
     recurso = "area:" + area_activa
     # La revisión se capturó al pulsar «Actualizar en base de datos», no al guardar.
@@ -3569,7 +3737,8 @@ CLAVES_TRABAJO_AREA = (
     "data_extracted", "user_edited_fields", "result_bytes", "extracted_text",
     "fecha_ultima_extraccion_ficha", "seleccion_campos_excel", "excel_para_actualizar",
     "raw_extracted_text", "fuentes_pdf", "discrepancias_pdf",
-    "conflictos_pendientes", "origen_campos_documentales",
+    "conflictos_pendientes", "fuentes_elegidas_usuario", "texto_optico_original",
+    "origen_campos_documentales",
     "prestacion_acreditacion_vinculada", "estado_vinculacion_acreditacion",
     "bytes_plantilla_inicial", "revision_plantilla_origen",
     "revision_plantilla_pendiente", "metadata_plantilla_pendiente",
@@ -4065,7 +4234,7 @@ def _seleccionar_candidato_acreditacion(identificador):
     st.session_state["acreditacion_coincidencia_automatica"] = None
 
 
-def _fuente_pdf_apa_cacheada(pdf, examen):
+def _fuente_pdf_apa_cacheada(pdf, examen, texto_reconocido=""):
     """Evita volver a abrir un PDF solo para su ficha bibliográfica en cada rerun.
 
     La clave incluye huella del archivo, nombre y examen. Un archivo actualizado
@@ -4075,24 +4244,47 @@ def _fuente_pdf_apa_cacheada(pdf, examen):
     contenido = pdf.getvalue()
     # Versión del analizador: evita reutilizar referencias antiguas después
     # de introducir el reconocimiento del título y los datos editoriales Roche.
-    clave = ("bibliografia_v4", pdf.name, hashlib.sha256(contenido).hexdigest(), examen or "")
+    clave = ("bibliografia_v4", pdf.name, hashlib.sha256(contenido).hexdigest(),
+             examen or "", hashlib.sha256(texto_reconocido.encode("utf-8")).hexdigest())
     cache = st.session_state.setdefault("cache_apa_pdf", {})
     if clave not in cache:
         if len(cache) >= 12:
             cache.pop(next(iter(cache)))
-        cache[clave] = apa.fuente_pdf(pdf.name, contenido, examen)
+        if texto_reconocido:
+            cache[clave] = apa.fuente_pdf(pdf.name, contenido, examen,
+                                              texto_reconocido=texto_reconocido)
+        else:
+            cache[clave] = apa.fuente_pdf(pdf.name, contenido, examen)
     return cache[clave]
 
 
-def _fuentes_para_referencias(pdfs_activos, modo_conjunto, indice_actual, examen, datos, origen_campos, usó_cartera):
+def _texto_optico_para_referencia(texto_global, nombre_pdf):
+    """En análisis conjunto, no atribuir a un PDF la fecha de otro PDF."""
+    texto_global = str(texto_global or "")
+    cabecera = re.compile(r"(?m)^===== (.+?) =====\n")
+    bloques = list(cabecera.finditer(texto_global))
+    if not bloques:
+        return texto_global
+    for indice, marca in enumerate(bloques):
+        if marca.group(1) == nombre_pdf:
+            fin = bloques[indice + 1].start() if indice + 1 < len(bloques) else len(texto_global)
+            return texto_global[marca.end():fin].strip()
+    return ""  # Nunca tomar la fecha de otro documento.
+
+
+def _fuentes_para_referencias(pdfs_activos, indice_actual, examen, datos, origen_campos, usó_cartera):
     """Referencias de documentos realmente utilizados, nunca solo por estar en SQLite."""
     if not pdfs_activos:
         return [], []
-    pdf_seleccionados = pdfs_activos if modo_conjunto else [pdfs_activos[indice_actual]]
+    pdf_seleccionados = [pdfs_activos[indice_actual]]
     # Excluir documentos sin campos extraídos, aunque estén cargados en la cola.
     nombres_con_aporte = set(st.session_state.get("pdf_documentos_con_aporte", []))
-    pdf_fuentes = [_fuente_pdf_apa_cacheada(pdf, examen) for pdf in pdf_seleccionados
-                   if pdf.name in nombres_con_aporte]
+    pdf_fuentes = [_fuente_pdf_apa_cacheada(
+        pdf, examen, _texto_optico_para_referencia(
+            st.session_state.get("extracted_text", ""), pdf.name)
+        if st.session_state.get("procedencia_modalidad") == "Documentos escaneados"
+        else "")
+        for pdf in pdf_seleccionados if pdf.name in nombres_con_aporte]
     todas = list(pdf_fuentes)
     id_origen = {
         "Normas Generales de Toma de Muestras": "normas_generales",
@@ -4101,6 +4293,17 @@ def _fuentes_para_referencias(pdfs_activos, modo_conjunto, indice_actual, examen
     ids = set()
     for campo, origen in origen_campos.items():
         if not str(datos.get(campo, "") or "").strip():
+            continue
+        # Citar un documento solo cuando el valor vigente realmente proviene
+        # de él, y no porque también estaba disponible durante el análisis.
+        valor_institucional = st.session_state.get(
+            "procedencia_valores_documentales", {}).get(campo)
+        if str(valor_institucional or "").strip() != str(datos.get(campo, "") or "").strip():
+            continue
+        if (st.session_state.get("procedencia_modalidad") == "Documentos escaneados"
+                and campo not in st.session_state.get("fuentes_elegidas_usuario", set())
+                and str(st.session_state.get("procedencia_pdf_campos", {}).get(campo, "") or "").strip()
+                    == str(datos.get(campo, "") or "").strip()):
             continue
         if origen in id_origen:
             ids.add(id_origen[origen])
@@ -4133,7 +4336,10 @@ def _fuentes_para_referencias(pdfs_activos, modo_conjunto, indice_actual, examen
         if cache and cache[0] == metadatos["sha256"]:
             fuente = cache[1]
         else:
-            fuente = apa.fuente_institucional(fuente_id, metadatos)
+            # Solo ante cambio del documento: leer el original en PDF para
+            # encontrar fecha bibliográfica; jamás usar nombre/fecha de carga.
+            documento_original = fd.documento_fuente(DB_PATH, fuente_id, incluir_archivo=True)
+            fuente = apa.fuente_institucional(fuente_id, documento_original or metadatos)
             cache_fuentes[fuente_id] = (metadatos["sha256"], fuente)
         todas.append(fuente)
     return pdf_fuentes, todas
@@ -4352,7 +4558,7 @@ with st.sidebar:
             "Cargar nuevas Normas Generales (.docx o .pdf)", type=["docx", "pdf"],
             key="actualizar_normas_archivo")
         if nuevo_normas is not None and st.button(
-                "Guardar nuevas Normas en SQLite", key="guardar_normas_nuevas",
+                "Guardar nuevas normas en la base de datos", key="guardar_normas_nuevas",
                 type="primary", use_container_width=True):
             solicitar_cambio("normas", "fuente:normas_generales",
                             archivo=nuevo_normas.getvalue(), nombre_archivo=nuevo_normas.name,
@@ -4415,8 +4621,8 @@ if st.session_state.get("area_activa") is None:
         1. **Selecciona un Área del laboratorio** en el menú de la izquierda (*Microbiología, Hematología y coagulación, Bioquímica, Hormonas e inmunidad, Derivados*).
         2. **Administra y selecciona el examen** que deseas procesar usando el botón **Administrar exámenes**.
         3. **Carga las fichas técnicas en PDF** (lote de hasta 5 documentos simultáneos) y organiza la cola de procesamiento si lo deseas.
-        4. **Define los parámetros operacionales** (*Laboratorio de procesamiento, Actualizado por, Autorizado por*) y verifica el emparejamiento con la Cartera en SQLite.
-        5. **Haz clic en "Analizar documento"** para realizar la extracción automática de texto, OCR y cruce con la Base Maestra de Cartera.
+        4. **Define los parámetros operacionales** (*Laboratorio de procesamiento, Actualizado por, Autorizado por*) y verifica el emparejamiento con la Cartera de Exámenes.
+        5. **Haz clic en "Analizar documento"** para realizar la extracción automática de texto, lectura óptica y cruce con la Base Maestra de Cartera.
         6. **Revisa y edita la información** en la tabla interactiva, resuelve discrepancias si existen, y actualiza la planilla del área o descarga el Excel consolidado.
         """
     )
@@ -4424,7 +4630,7 @@ if st.session_state.get("area_activa") is None:
     st.divider()
     
     # --- MÓDULO DE ESTADO DE LA CARTERA SQLITE EN LA PÁGINA DE BIENVENIDA ---
-    st.markdown("#### Estado de la Cartera SQLite:")
+    st.markdown("#### Estado de la Cartera de Exámenes:")
     lista_cartera_home = obtener_lista_cartera_db()
     total_examenes_cartera = len(lista_cartera_home)
     fecha_cartera_home, cartera_expirada_home, msg_cartera_home = fecha_actualizacion_cartera()
@@ -4470,31 +4676,39 @@ else:
                 st.session_state["mostrar_modal_examenes"] = True
                 st.rerun()
 
+        # Un solo selector: fichas técnicas conserva la extracción habitual;
+        # documentos escaneados habilita OCR optimizado y secciones numeradas.
+        modalidades_validas = ("Fichas técnicas", "Documentos escaneados")
+        if st.session_state.get("modo_procesamiento_pdf") not in (*modalidades_validas, None):
+            st.session_state.pop("modo_procesamiento_pdf", None)
+        # El selector secundario de versiones anteriores se retira de sesión.
+        st.session_state.pop("tipo_documento_extraccion", None)
         modo_procesamiento = st.radio(
-            "Modalidad de análisis",
-            ["Un PDF por examen (cola actual)", "Varios PDF para un mismo examen"],
-            horizontal=True,
+            "Modalidad de análisis", modalidades_validas, horizontal=True,
             key="modo_procesamiento_pdf",
-            help="En el segundo modo todos los PDF completan una sola ficha del examen seleccionado."
+            help="Fichas técnicas: análisis habitual. Documentos escaneados: lectura de PDF escaneados y manuales."
         )
-        modo_conjunto = modo_procesamiento == "Varios PDF para un mismo examen"
+        es_manual_procedimiento = modo_procesamiento == "Documentos escaneados"
+        # La modalidad de varios PDF por una misma ficha ya no se ofrece.
+        # Se mantiene la cola individual; los archivos se procesan uno por uno.
+        modo_conjunto = False
         if st.session_state.get("modo_pdf_anterior") != modo_procesamiento:
             st.session_state["modo_pdf_anterior"] = modo_procesamiento
             st.session_state["cola_pdf_indice"] = 0
             for clave in ("cola_pdf_omitidos", "cola_pdf_procesados", "cola_pdf_finalizada_omision",
                           "historial_edicion_tabla", "campos_restaurados_tabla"):
                 st.session_state.pop(clave, None)
-            for clave in ("data_extracted", "result_bytes", "extracted_text", "user_edited_fields", "discrepancias_pdf", "fuentes_pdf", "modal_pdf_pdf_abierto", "modal_discrepancias_unificado"):
+            for clave in ("data_extracted", "result_bytes", "extracted_text", "user_edited_fields", "discrepancias_pdf", "fuentes_pdf", "modal_pdf_pdf_abierto", "modal_discrepancias_unificado", "manual_ocr_diagnostico", "procedencia_pdf_campos", "procedencia_cartera_campos", "procedencia_valores_documentales", "manual_pdf_digital_detectado"):
                 st.session_state.pop(clave, None)
 
         # CARGA DE ARCHIVOS PDF Y CONTROL DE COLA
         pdfs = st.file_uploader(
-            (f"Cargar hasta {MAX_PDFS_PERMITIDOS} PDF del mismo examen" if modo_conjunto
-             else f"Cargar fichas técnicas (Lote de hasta {MAX_PDFS_PERMITIDOS} PDF para procesar en cola)"),
+            (f"Cargar documentos escaneados (hasta {MAX_PDFS_PERMITIDOS} PDF)"
+             if es_manual_procedimiento else
+             f"Cargar fichas técnicas (hasta {MAX_PDFS_PERMITIDOS} PDF para procesar en cola)"),
             type=["pdf"],
             accept_multiple_files=True,
-            help=("Todos los archivos se analizan juntos para completar una sola ficha." if modo_conjunto
-                  else f"Puedes cargar hasta {MAX_PDFS_PERMITIDOS} archivos PDF para procesarlos de forma individual uno tras otro."),
+            help=f"Puedes cargar hasta {MAX_PDFS_PERMITIDOS} archivos PDF para procesarlos de forma individual uno tras otro.",
             key=f"pdf_uploader_{st.session_state.get('generacion_cargas_area', 0)}"
         )
 
@@ -4607,7 +4821,7 @@ else:
             hash_archivos = "_".join(sorted(nombres_actuales))
             key_sortable_dinamico = f"sortable_queue_{st.session_state.get('generacion_cargas_area', 0)}_{hash_archivos}"
 
-            if len(nombres_actuales) > 1 and not modo_conjunto:
+            if len(nombres_actuales) > 1:
                 st.markdown("##### Organiza el orden de la cola de procesamiento:")
                 
                 col_posicion, col_fichas = st.columns([1, 14])
@@ -4642,13 +4856,30 @@ else:
             pdfs_ordenados = [mapa_pdfs[nombre] for nombre in st.session_state["orden_nombres_pdf"] if nombre in mapa_pdfs]
 
             total_pdfs = len(pdfs_ordenados)
-            idx_actual = 0 if modo_conjunto else st.session_state.get("cola_pdf_indice", 0)
+            idx_actual = st.session_state.get("cola_pdf_indice", 0)
 
             if idx_actual >= total_pdfs:
                 st.session_state["cola_pdf_indice"] = 0
                 idx_actual = 0
 
             pdf_activo = pdfs_ordenados[idx_actual]
+            try:
+                clase_pdf, paginas_escaneadas, total_paginas = previsualizar_tipo_pdf(
+                    pdf_activo.getvalue())
+                if clase_pdf == 'escaneado' and not es_manual_procedimiento:
+                    st.warning('Este PDF parece escaneado y no contiene texto seleccionable. '
+                               'Para leerlo, elige «Documentos escaneados».')
+                elif clase_pdf == 'mixto':
+                    st.info(f'Este PDF combina texto e imágenes: {paginas_escaneadas} de '
+                            f'{total_paginas} páginas podrían necesitar lectura óptica. '
+                            'Comprueba que la modalidad elegida sea adecuada.')
+                elif clase_pdf == 'texto' and es_manual_procedimiento:
+                    st.info('Este PDF contiene texto seleccionable. Puedes utilizar '
+                            '«Fichas técnicas» si corresponde a una ficha de fabricante; '
+                            'mantén «Documentos escaneados» si necesitas interpretar un manual.')
+            except Exception:
+                # La clasificación es solo orientativa: nunca impedir la carga.
+                pass
 
             if modo_conjunto:
                 st.info(f"**Análisis conjunto:** {total_pdfs} documento(s) para el examen **{examen_activo or 'por seleccionar'}**. Se generará una única ficha. Los valores contradictorios requieren revisión.")
@@ -4877,7 +5108,7 @@ else:
                 )
                 st.session_state["autorizado_activo"] = sel_aut
 
-            with st.expander("Administrar opciones (Añadir / Eliminar de las listas arriba)"):
+            with st.expander("Administrar parámetros operacionales"):
                 tab_m_lab, tab_m_act = st.tabs(["Laboratorios", "Encargados"])
 
                 with tab_m_lab:
@@ -4946,15 +5177,35 @@ else:
 
             st.divider()
 
+            # Permitir omitir portadas/anexos en documentos escaneados extensos.
+            # No se omite ninguna página por defecto; el usuario elige el rango.
+            rango_paginas_manual = None
+            if es_manual_procedimiento:
+                if not modo_conjunto:
+                    try:
+                        with fitz.open(stream=pdf_activo.getvalue(), filetype="pdf") as doc_paginas:
+                            cantidad_paginas_manual = doc_paginas.page_count
+                        if cantidad_paginas_manual > 1:
+                            rango_paginas_manual = st.slider(
+                                "Páginas del documento por analizar con lectura óptica",
+                                min_value=1, max_value=cantidad_paginas_manual,
+                                value=(1, cantidad_paginas_manual),
+                                key="paginas_manual_" + hashlib.sha256(
+                                    pdf_activo.getvalue()).hexdigest()[:12],
+                                help="Para acelerar las pruebas puedes acotar las páginas; "
+                                     "las páginas fuera del rango no aportarán información.")
+                    except Exception:
+                        pass
+
             # Vista previa aislada: las flechas navegan sin reconstruir toda la interfaz.
             with st.expander("Vista previa interactiva del documento PDF en revisión", expanded=True):
-                _visor_pdf_rapido(pdf_activo, modo_conjunto, total_pdfs, pdfs_ordenados, idx_actual)
+                _visor_pdf_rapido(pdf_activo, idx_actual)
 
             # BOTÓN DE ANÁLISIS
             st.write("")
             col_btn_analisis, col_sp1 = st.columns([1.5, 2])
             with col_btn_analisis:
-                iniciar_analisis = st.button("Analizar todos los PDF del examen" if modo_conjunto else "Analizar documento", type="primary", key="analyze_pdf", disabled=exceso_archivos, use_container_width=False)
+                iniciar_analisis = st.button("Analizar documento", type="primary", key="analyze_pdf", disabled=exceso_archivos, use_container_width=False)
 
             if iniciar_analisis:
                 if not examen_activo:
@@ -4963,26 +5214,22 @@ else:
                     st.warning("Selecciona un laboratorio de procesamiento antes de analizar.")
                 else:
                     try:
-                        # Conservar ediciones confirmadas del mismo examen al volver a analizar.
+                        # Una extracción nueva inicia con propuestas nuevas. Las
+                        # correcciones anteriores se conservan en el Excel de
+                        # origen, visible al desmarcar «Aplicar», no se reciclan.
                         ediciones_previas = {}
-                        if st.session_state.get("examen_resultado") == examen_activo:
-                            for campo in st.session_state.get("user_edited_fields", set()):
-                                valor = st.session_state.get("data_extracted", {}).get(campo, "")
-                                if str(valor or "").strip():
-                                    ediciones_previas[campo] = valor
                         st.session_state.pop("data_extracted", None)
                         st.session_state.pop("user_edited_fields", None)
                         st.session_state.pop("extracted_text", None)
                         st.session_state.pop("conflictos_pendientes", None)
 
                         st.session_state["aggrid_key_counter"] += 1
-                        if st.session_state.get("examen_resultado") != examen_activo:
-                            st.session_state.pop("seleccion_campos_excel", None)
+                        st.session_state.pop("seleccion_campos_excel", None)
 
                         aliases_area = get_field_aliases(area_activa)
                         plantilla_bytes_db, _ = obtener_plantilla_area_db(area_activa)
 
-                        if "result_bytes" in st.session_state and idx_actual > 0 and not modo_conjunto:
+                        if "result_bytes" in st.session_state and idx_actual > 0:
                             template_bytes_init = st.session_state["result_bytes"]
                         elif plantilla_bytes_db:
                             template_bytes_init = plantilla_bytes_db
@@ -4998,6 +5245,8 @@ else:
                             template_bytes_init = buf.getvalue()
 
                         st.session_state["bytes_plantilla_inicial"] = template_bytes_init
+                        st.session_state["valores_anteriores_ficha"] = rv.valores_anteriores(
+                            template_bytes_init, examen_activo, norm)
                         if "revision_plantilla_origen" not in st.session_state or idx_actual == 0:
                             st.session_state["revision_plantilla_origen"] = gp.estado_recurso(DB_PATH, "area:" + area_activa)
 
@@ -5016,17 +5265,61 @@ else:
 
                         adicionales = [(pdf.name, pdf.getvalue()) for pdf in pdfs_ordenados[1:]] if modo_conjunto else []
                         if modo_conjunto:
-                            parsed_pdf_data, fuentes, diferencias, raw_text, _ = consolidar_documentos_pdf(
-                                [(pdf.name, pdf.getvalue()) for pdf in pdfs_ordenados], aliases_area, examen_activo
+                            parsed_pdf_data, fuentes, diferencias, raw_text, metodo_lectura_pdf = consolidar_documentos_pdf(
+                                [(pdf.name, pdf.getvalue()) for pdf in pdfs_ordenados], aliases_area, examen_activo,
+                                manual_procedimiento=es_manual_procedimiento
                             )
                             st.session_state["fuentes_pdf"] = fuentes
                             st.session_state["discrepancias_pdf"] = diferencias
                         else:
-                            raw_text, _ = extract_pdf_text(pdf_activo.getvalue(), pdf_activo.name, examen_activo,
-                                                                hematologia=es_alias_hematologia(aliases_area))
-                            parsed_pdf_data = infer_name_code(raw_text, parse_labeled_text(raw_text, aliases_area, examen_activo))
+                            # Mostrar avance real de las páginas OCR, sin refrescar toda la aplicación.
+                            estado_lectura_pdf = st.empty()
+                            def _actualizar_progreso_pdf(pagina, total, uso_ocr):
+                                descripcion = (f"Leyendo PDF: página {pagina} de {total}"
+                                               if pagina else f"Iniciando lectura de {total} páginas")
+                                if uso_ocr:
+                                    descripcion += " · Lectura óptica"
+                                estado_lectura_pdf.progress(
+                                    pagina / max(total, 1), text=descripcion)
+                            try:
+                                raw_text, metodo_lectura_pdf = extract_pdf_text(
+                                    pdf_activo.getvalue(), pdf_activo.name, examen_activo,
+                                    hematologia=es_alias_hematologia(aliases_area),
+                                    progreso=_actualizar_progreso_pdf,
+                                    rango_paginas=rango_paginas_manual,
+                                    manual_procedimiento=es_manual_procedimiento)
+                            finally:
+                                estado_lectura_pdf.empty()
+                            # Conservar diagnóstico de lectura: si no se encuentra
+                            # información, distinguir OCR legible de secciones no reconocidas.
+                            diagnostico_manual_actual = (mp.analizar_manual(raw_text)
+                                                         if es_manual_procedimiento else None)
+                            manual_digital_reconocido = (
+                                not es_manual_procedimiento and
+                                mp.es_manual_de_procedimiento_textual(raw_text))
+                            parsed_pdf_data = (dict(diagnostico_manual_actual["campos"])
+                                               if es_manual_procedimiento else
+                                               mp.completar_homologos_manual_digital(
+                                                   raw_text, infer_name_code(
+                                                       raw_text, parse_labeled_text(
+                                                           raw_text, aliases_area, examen_activo))))
+                            if area_activa == "Derivados":
+                                parsed_pdf_data.update(de.extraer_ficha_derivados(
+                                    raw_text, pdf_activo.getvalue()))
+                            # «Referencias» solo entra en la ficha tras pulsar
+                            # expresamente el botón del panel bibliográfico.
+                            parsed_pdf_data.pop("Referencias", None)
+                            if parsed_pdf_data.get("Equipamiento utilizado"):
+                                parsed_pdf_data["Equipamiento utilizado"] = eq.deduplicar_equipamiento(
+                                    parsed_pdf_data["Equipamiento utilizado"])
+                            manuales_permitidos = (
+                                set(fd.CAMPOS_CONTROLADOS) if
+                                (es_manual_procedimiento or area_activa == "Derivados") else
+                                {'Muestra requerida y recipiente', 'Procesamiento de muestras'}
+                                if manual_digital_reconocido else set())
                             parsed_pdf_data = {campo: val for campo, val in parsed_pdf_data.items()
-                                               if campo not in fd.CAMPOS_CONTROLADOS}
+                                               if campo not in fd.CAMPOS_CONTROLADOS
+                                               or campo in manuales_permitidos}
                             st.session_state.pop("fuentes_pdf", None)
                             st.session_state.pop("discrepancias_pdf", None)
 
@@ -5034,11 +5327,22 @@ else:
                             for campo in campos_comparables:
                                 val_pdf = str(parsed_pdf_data.get(campo, "")).strip()
                                 val_cartera = str(info_cartera.get(campo, "")).strip()
+                                if campo == "Equipamiento utilizado":
+                                    val_pdf = eq.deduplicar_equipamiento(val_pdf)
+                                    val_cartera = eq.deduplicar_equipamiento(val_cartera)
+                                    if val_pdf:
+                                        parsed_pdf_data[campo] = val_pdf
 
-                                if val_pdf and val_cartera and val_pdf.casefold() != val_cartera.casefold():
-                                    conflictos[campo] = {"pdf": val_pdf, "cartera": val_cartera}
-                                elif not val_pdf and val_cartera:
+                                if val_cartera:
                                     datos_sobrescribir[campo] = val_cartera
+                                    if (val_pdf and (not eq.equipamientos_equivalentes(val_pdf, val_cartera)
+                                            if campo == "Equipamiento utilizado" else
+                                            ' '.join(val_pdf.casefold().split()) !=
+                                            ' '.join(val_cartera.casefold().split()))):
+                                        conflictos[campo] = {
+                                            "pdf": val_pdf, "cartera": val_cartera,
+                                            "fuente": "Cartera de Exámenes del CRS",
+                                        }
 
                         # Rastrear los PDF que aportaron datos reales a esta ficha.
                         if modo_conjunto:
@@ -5076,9 +5380,85 @@ else:
                             indicaciones_cartera=(info_cartera or {}).get("Preparación del paciente", ""),
                         )
                         datos_sobrescribir.update(valores_doc)
-                        if origen_doc.get("Preparación del paciente") == "Cartera de Exámenes del CRS · Indicaciones":
-                            st.session_state["cartera_aporto_campos"] = True
+                        if area_activa == "Derivados":
+                            # Comparar los candidatos de una fila documentada con
+                            # cualquier fuente institucional habilitada y con valor.
+                            # La prioridad define la propuesta, pero NO oculta una
+                            # diferencia: siempre se ofrecen ambas opciones.
+                            for campo, propuesto in parsed_pdf_data.items():
+                                if campo == 'Código' or campo in conflictos:
+                                    continue
+                                valor_inst = str(datos_sobrescribir.get(campo, '') or '').strip()
+                                if not de.son_valores_distintos(campo, propuesto, valor_inst):
+                                    continue
+                                fuente_inst = str(origen_doc.get(campo, '') or '')
+                                if not fuente_inst and campo in ('Equipamiento utilizado', 'Plazo entrega resultados'):
+                                    fuente_inst = 'Cartera de Exámenes del CRS'
+                                if not fuente_inst:
+                                    continue
+                                conflictos[campo] = {
+                                    'pdf': str(propuesto).strip(), 'cartera': valor_inst,
+                                    'fuente': fuente_inst,
+                                }
+                        if es_manual_procedimiento:
+                            # Escáner primero SOLO donde esta procedencia existe;
+                            # Código conserva Cartera prioritaria. Una fuente
+                            # elegida por el usuario tiene preferencia explícita.
+                            eleccion_crs = bool(st.session_state.get(
+                                "cartera_seleccion_confirmada_manualmente"))
+                            eleccion_acreditacion = bool(st.session_state.get(
+                                "acreditacion_seleccion_confirmada_manualmente"))
+                            elegidos_expresamente = set()
+                            for campo, valor_ocr_bruto in parsed_pdf_data.items():
+                                if (campo == "Código" or campo in (
+                                        "Nombre LIS", "Laboratorio de procesamiento",
+                                        "Actualizado por", "Autorizado por",
+                                        "Fecha actualización", "Referencias")):
+                                    continue
+                                valor_ocr = str(valor_ocr_bruto or "").strip()
+                                if not valor_ocr:
+                                    continue
+                                origen_institucional = str(origen_doc.get(campo, ""))
+                                es_expresa = (
+                                    (origen_institucional.startswith("Cartera de Acreditación")
+                                     and eleccion_acreditacion)
+                                    or (origen_institucional.startswith("Cartera de Exámenes del CRS")
+                                        and eleccion_crs)
+                                    or (campo in ("Equipamiento utilizado", "Plazo entrega resultados")
+                                        and eleccion_crs and bool(info_cartera))
+                                )
+                                if es_expresa:
+                                    elegidos_expresamente.add(campo)
+                                    valor_institucional = str(datos_sobrescribir.get(campo, "") or "").strip()
+                                    diferente = (not eq.equipamientos_equivalentes(valor_ocr, valor_institucional)
+                                                 if campo == "Equipamiento utilizado" else
+                                                 ' '.join(valor_ocr.casefold().split()) !=
+                                                 ' '.join(valor_institucional.casefold().split()))
+                                    if valor_institucional and diferente:
+                                        conflictos[campo] = {
+                                            "pdf": valor_ocr, "cartera": valor_institucional,
+                                            "fuente": ("Cartera de Acreditación" if
+                                                       origen_institucional.startswith("Cartera de Acreditación")
+                                                       else "Cartera de Exámenes del CRS"),
+                                        }
+                                else:
+                                    # Dejar que process() aplique el texto óptico
+                                    # como propuesta en lugar del dato institucional.
+                                    datos_sobrescribir.pop(campo, None)
+                            st.session_state["fuentes_elegidas_usuario"] = elegidos_expresamente
+                        else:
+                            st.session_state["fuentes_elegidas_usuario"] = set()
+                        # La Cartera se considera utilizada solo en los
+                        # campos cuya propuesta final procede de ella.
+                        st.session_state["cartera_aporto_campos"] = bool(info_cartera and any(
+                            str(info_cartera.get(campo, "") or "").strip()
+                            and str(info_cartera.get(campo, "") or "").strip() ==
+                                str(datos_sobrescribir.get(campo, "") or "").strip()
+                            for campo in ("Código", "Equipamiento utilizado",
+                                          "Plazo entrega resultados", "Preparación del paciente")
+                        ))
                         st.session_state["origen_campos_documentales"] = origen_doc
+                        st.session_state["procedencia_valores_documentales"] = dict(valores_doc)
                         st.session_state["prestacion_acreditacion_vinculada"] = prestacion_doc
                         st.session_state["estado_vinculacion_acreditacion"] = estado_vinculo
 
@@ -5089,8 +5469,36 @@ else:
                             st.session_state.get("actualizado_activo", ""),
                             st.session_state.get("autorizado_activo", ""),
                             datos_sobrescribir=datos_sobrescribir,
-                            documentos_adicionales=adicionales
+                            documentos_adicionales=adicionales,
+                            datos_pdf_preextraidos=(parsed_pdf_data, raw_text, metodo_lectura_pdf),
+                            manual_procedimiento=es_manual_procedimiento
                         )
+
+                        if data.get("Equipamiento utilizado"):
+                            data["Equipamiento utilizado"] = eq.deduplicar_equipamiento(
+                                data["Equipamiento utilizado"])
+                        if es_manual_procedimiento:
+                            # No confundir "PDF leído" con "PDF que aportó valores".
+                            # En un examen ya validado puede haber coincidencias
+                            # que no se aplican porque la celda está ocupada.
+                            diag = diagnostico_manual_actual
+                            st.session_state["manual_ocr_diagnostico"] = diag
+                            if diag["campos"]:
+                                # El fondo del aviso lo proporciona el tema de Streamlit.
+                                # Cada nombre se resalta de forma legible en ambos modos,
+                                # sin alterar los otros mensajes informativos de la aplicación.
+                                campos_destacados = ", ".join(
+                                    "**" + re.sub(r"([\\*_[\]`])", r"\\\1", str(campo)) + "**"
+                                    for campo in diag["campos"]
+                                )
+                                with st.container(key="aviso_campos_manual"):
+                                    st.info("El manual permitió reconocer los siguientes campos: "
+                                            + campos_destacados + ". "
+                                            "Revisa los datos propuestos antes de guardarlos.")
+                            else:
+                                st.warning("La lectura óptica terminó, pero no se identificó información suficiente para los campos de la ficha.")
+                        else:
+                            st.session_state.pop("manual_ocr_diagnostico", None)
 
                         # Las ediciones manuales confirmadas conservan la prioridad máxima.
                         if ediciones_previas:
@@ -5111,6 +5519,15 @@ else:
                         # no al día en que se descargue el documento.
                         st.session_state["fecha_ultima_extraccion_ficha"] = fecha_hoy_nombre_archivo()
                         st.session_state["data_extracted"] = copy.deepcopy(data)
+                        st.session_state["manual_pdf_digital_detectado"] = (
+                            not es_manual_procedimiento and
+                            mp.es_manual_de_procedimiento_textual(raw_text))
+                        st.session_state["procedencia_pdf_campos"] = dict(parsed_pdf_data)
+                        st.session_state["procedencia_cartera_campos"] = {
+                            campo: valor for campo, valor in datos_sobrescribir.items()
+                            if campo not in fd.CAMPOS_CONTROLADOS
+                        }
+                        st.session_state["procedencia_modalidad"] = modo_procesamiento
                         st.session_state["user_edited_fields"] = set(ediciones_previas)
                         st.session_state.pop("historial_edicion_tabla", None)
                         st.session_state.pop("campos_restaurados_tabla", None)
@@ -5125,9 +5542,17 @@ else:
                             "Ficha generada", f"Área: {area_activa}; examen: {examen_activo}")
 
                         st.session_state.pop("conflictos_pendientes", None)
+                        st.session_state.pop("pdf_para_cartera", None)
                         st.session_state["modal_conflictos_abierto"] = False
                         st.session_state["modal_discrepancias_unificado"] = False
                         if conflictos:
+                            # Cada análisis ofrece inicialmente la propuesta de
+                            # la Cartera seleccionada, sin heredar una elección
+                            # de discrepancia de un examen anterior.
+                            for campo_conflicto in conflictos:
+                                clave_preferencia = ("unificado_cartera_" +
+                                     hashlib.sha256(campo_conflicto.encode()).hexdigest()[:16])
+                                st.session_state.pop(clave_preferencia, None)
                             st.session_state["conflictos_pendientes"] = conflictos
                             # PDF vs Cartera se abre solo por su propio botón,
                             # nunca simultáneamente con PDF vs PDF.
@@ -5136,13 +5561,15 @@ else:
                         # renderiza justo debajo en esta misma ejecución: forzar
                         # st.rerun() reconstruía de nuevo la página y podía saltar
                         # la vista desde el botón hasta el final de la tabla.
-                        st.success(f"Se analizaron {total_pdfs} PDF para el examen seleccionado." if modo_conjunto else f"¡Se procesó correctamente el archivo «{pdf_activo.name}»!")
+                        st.success(f"¡Se procesó correctamente el archivo «{pdf_activo.name}»!")
 
                     except Exception as e:
                         st.error(f"No se pudo analizar el documento: {e}")
         elif not pdfs:
             st.session_state.pop("result_bytes", None)
             st.session_state.pop("data_extracted", None)
+            st.session_state.pop("manual_ocr_diagnostico", None)
+            st.session_state.pop("manual_pdf_digital_detectado", None)
             st.session_state.pop("orden_nombres_pdf", None)
             for clave in ("cola_pdf_omitidos", "cola_pdf_procesados", "cola_pdf_finalizada_omision",
                           "historial_edicion_tabla", "campos_restaurados_tabla"):
@@ -5158,8 +5585,8 @@ else:
             pdfs_ordenados_rev = [mapa_pdfs[nombre] for nombre in st.session_state.get("orden_nombres_pdf", []) if nombre in mapa_pdfs] if 'mapa_pdfs' in locals() else pdfs
             pdf_actual_nombre = pdfs_ordenados_rev[st.session_state.get('cola_pdf_indice', 0)].name if pdfs_ordenados_rev else "documento activo"
 
-            st.subheader("Revisión de la ficha consolidada (todos los PDF)" if modo_conjunto else f"Revisión e información extraída de «{pdf_actual_nombre}»")
-            diferencias_pdf = st.session_state.get("discrepancias_pdf", {}) if modo_conjunto else {}
+            st.subheader(f"Revisión e información extraída de «{pdf_actual_nombre}»")
+            diferencias_pdf = st.session_state.get("discrepancias_pdf", {})
             diferencias_cartera = st.session_state.get("conflictos_pendientes", {})
             if diferencias_pdf or diferencias_cartera:
                 if diferencias_pdf:
@@ -5173,25 +5600,37 @@ else:
                 st.success("No hay discrepancias pendientes de revisión.")
 
             with st.expander("Procedencia de campos documentales", expanded=False):
-                st.caption("Fuentes de mayor a menor prioridad. Se destaca la utilizada en el examen; no cambia los tres estados ni sus colores.")
+                st.caption("Fuentes de mayor a menor prioridad. Se destaca la utilizada en el examen.")
                 origen_registrado = st.session_state.get("origen_campos_documentales", {})
                 filas_cuaderno = []
-                for campo in fd.CAMPOS_CONTROLADOS:
-                    procedencia = origen_registrado.get(campo, "Sin información válida en SQLite")
-                    fuente_aplicada = fd.identificar_fuente_procedencia(procedencia)
-                    prioridades = fd.PRIORIDAD_FUENTES_POR_CAMPO.get(campo, ())
+                # Exactamente el mismo orden de la tabla de revisión.
+                for campo in aliases_area:
+                    procedencia = origen_registrado.get(campo, "")
+                    prioridades, fuente_aplicada = pc.procedencia_campo(
+                        campo, data.get(campo, ""), procedencia,
+                        st.session_state.get("procedencia_pdf_campos", {}),
+                        st.session_state.get("procedencia_cartera_campos", {}),
+                        st.session_state.get("user_edited_fields", set()),
+                        es_manual_procedimiento,
+                        st.session_state.get("procedencia_valores_documentales", {}),
+                        st.session_state.get("texto_referencias_auto", ""),
+                        st.session_state.get("fuentes_elegidas_usuario", set()),
+                        manual_digital=st.session_state.get("manual_pdf_digital_detectado", False),
+                        es_derivados=(area_res == "Derivados"),
+                    )
                     nombres = []
                     for nombre_fuente in prioridades:
                         seleccionada = nombre_fuente == fuente_aplicada
                         clase = "cuaderno-fuente-seleccionada" if seleccionada else ""
                         sufijo = " (utilizada)" if seleccionada else ""
                         nombres.append(
-                            f'<span class="{clase}" title="{html.escape(str(procedencia), quote=True)}">'
+                            f'<span class="{clase}" title="{html.escape(str(procedencia or fuente_aplicada or "SIN FUENTE APLICADA"), quote=True)}">'
                             f'{html.escape(nombre_fuente + sufijo)}</span>'
                         )
                     prioridades_html = '<span class="cuaderno-separador">&gt;</span>'.join(nombres)
                     if not fuente_aplicada:
-                        prioridades_html += ' <span>(sin fuente aplicada)</span>'
+                        aviso_sin_fuente = '<span class="cuaderno-sin-fuente">SIN FUENTE APLICADA</span>'
+                        prioridades_html = ((prioridades_html + ' · ') if prioridades_html else '') + aviso_sin_fuente
                     filas_cuaderno.append(
                         '<div class="cuaderno-fila">'
                         f'<div class="cuaderno-campo">{html.escape(campo)}</div>'
@@ -5209,7 +5648,7 @@ else:
                 with st.container(key="contenedor_referencias"):
                     with st.expander("Referencias bibliográficas", expanded=True):
                       refs_pdf, refs_todas = _fuentes_para_referencias(
-                          pdfs_ordenados_rev, modo_conjunto, st.session_state.get("cola_pdf_indice", 0),
+                          pdfs_ordenados_rev, st.session_state.get("cola_pdf_indice", 0),
                           examen_activo, data,
                           st.session_state.get("origen_campos_documentales", {}),
                           st.session_state.get("cartera_aporto_campos", False),
@@ -5293,6 +5732,7 @@ else:
                     "Actualizar": bool(st.session_state.get("seleccion_campos_excel", {}).get(field, True)),
                     "Campo": field.strip(),
                     "Información extraída": value,
+                    "Valor anterior": st.session_state.get("valores_anteriores_ficha", {}).get(norm(field), ""),
                     "Estado": state,
                     ht.COLUMNA_COMANDO: "",
                 })
@@ -5306,6 +5746,8 @@ else:
                     <span style="background-color: #BAE6FD; color: #0369A1; padding: 2px 8px; border-radius: 4px; font-weight: bold;">Azul:</span> Campo modificado por usuario.
                     &nbsp;&nbsp;
                     <span style="background-color: #FFF0B3; color: #6B4D00; padding: 2px 8px; border-radius: 4px; font-weight: bold;">Amarillo:</span> Campo pendiente de revisión / no encontrado.
+                    &nbsp;&nbsp;
+                    <span style="background-color: #D99B60; color: #472509; padding: 2px 8px; border-radius: 4px; font-weight: bold;">Naranja:</span> Campo completado con valor anterior.
                     <br><br>
                     <ul style="margin: 0; padding-left: 1.25rem; list-style-type: disc;">
                         <li>Las casillas de la columna <b>Aplicar</b> indican qué campos reemplazar en el Excel al descargar. Desmarca un campo para conservar el valor anterior.</li>
@@ -5317,14 +5759,21 @@ else:
                 unsafe_allow_html=True
             )
 
-            # Reservar la ubicación del botón ANTES del grid, pero dibujarlo
-            # DESPUÉS de procesar la edición que acaba de llegar de AG Grid.
-            # De lo contrario el primer Suprimir se registra en el historial,
-            # pero el botón conserva el estado deshabilitado del rerun previo.
-            espacio_boton_deshacer = st.empty()
+            # Altura fija antes de recibir el grid: aunque el botón se
+            # complete después del evento (para habilitar el PRIMER Deshacer),
+            # el componente AG Grid nunca ocupa temporalmente su posición.
+            with st.container(height=62, border=False, key="zona_deshacer_estable"):
+                espacio_boton_deshacer = st.empty()
 
             get_row_style = JsCode("""
             function(params) {
+                if (!params.data) return null;
+                if (params.data['Actualizar'] === false) {
+                    if (!String(params.data['Valor anterior'] || '').trim()) {
+                        return {'backgroundColor': '#FFF0B3', 'color': '#6B4D00', 'fontWeight': '500'};
+                    }
+                    return {'backgroundColor': '#D99B60', 'color': '#472509', 'fontWeight': '600'};
+                }
                 var val = params.data['Información extraída'];
                 var estado = params.data['Estado'];
                 var valStr = val != null ? val.toString().trim() : '';
@@ -5379,6 +5828,9 @@ else:
                     this.elemento.setAttribute('aria-label', 'Actualizar campo ' + params.data['Campo']);
                     this.onChange = (evento) => {
                         params.node.setDataValue('Actualizar', !!evento.target.checked);
+                        // La vista alterna entre propuesta y valor anterior,
+                        // conservando la propuesta intacta para Excel y Ctrl+Z.
+                        params.api.redrawRows({rowNodes: [params.node]});
                     };
                     this.elemento.addEventListener('change', this.onChange);
                 }
@@ -5403,7 +5855,15 @@ else:
             )
             gb.configure_column(
                 "Información extraída",
-                editable=True,
+                editable=JsCode("function(params) { return params.data && params.data['Actualizar'] !== false && params.data['Campo'] !== 'Referencias'; }"),
+                valueFormatter=JsCode("""function(params) {
+                    if (params.data && params.data['Actualizar'] === false) {
+                        const anterior = params.data['Valor anterior'];
+                        return anterior == null || String(anterior).trim() === ''
+                            ? 'Sin valor anterior' : String(anterior);
+                    }
+                    return params.value == null ? '' : String(params.value);
+                }"""),
                 flex=5,
                 headerClass='ag-header-left',
                 cellEditor='agLargeTextCellEditor',
@@ -5411,9 +5871,17 @@ else:
                 cellEditorParams={'maxLength': 32767, 'rows': 18, 'cols': 85},
                 autoHeight=True
             )
+            gb.configure_column("Valor anterior", hide=True, editable=False,
+                                sortable=False, filter=False, suppressColumnsToolPanel=True)
             gb.configure_column(
                 "Estado",
                 editable=False,
+                valueFormatter=JsCode("""function(params) {
+                    if (params.data && params.data['Actualizar'] === false)
+                        return String(params.data['Valor anterior'] || '').trim()
+                            ? 'Valor anterior' : 'Sin valor anterior';
+                    return params.value == null ? '' : String(params.value);
+                }"""),
                 flex=2,
                 headerClass='ag-header-centered',
                 cellStyle={'textAlign': 'center', 'fontSize': '0.85rem'}
@@ -5672,7 +6140,10 @@ else:
             # original del indicador, sin forzar otro st.rerun.
             espacio_campos_encontrados.metric(
                 "Campos encontrados",
-                ht.contar_campos_encontrados(st.session_state.get("data_extracted", {})),
+                ht.contar_campos_encontrados({
+                    campo: valor for campo, valor in st.session_state.get("data_extracted", {}).items()
+                    if seleccion_actual.get(campo, True)
+                }),
             )
 
             # Este bloque se renderiza arriba de la tabla gracias al espacio
