@@ -1,0 +1,27 @@
+# Dos temas seleccionables en el menú de Streamlit: Claro / Oscuro / Sistema.
+# La variante oscura usa azul marino; el modo claro conserva sus colores.
+# No modifica la extracción ni la base de datos.
+[theme]
+base = "dark"
+
+[theme.dark]
+primaryColor = "#76A9D4"
+backgroundColor = "#101D2D"
+secondaryBackgroundColor = "#1D3047"
+textColor = "#EAF1F8"
+
+[theme.dark.sidebar]
+backgroundColor = "#16283E"
+secondaryBackgroundColor = "#233B55"
+textColor = "#EAF1F8"
+
+[theme.light]
+primaryColor = "#D63C3C"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F6FA"
+textColor = "#172033"
+
+[theme.light.sidebar]
+backgroundColor = "#F3F6FA"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#172033"
