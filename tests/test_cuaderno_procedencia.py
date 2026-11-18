@@ -25,9 +25,11 @@ class TestCuadernoProcedencia(unittest.TestCase):
     def test_conserva_fuentes_y_azul_marino(self):
         self.assertIn('color: #17365D', APP)
         self.assertIn('color: #556479', APP)
-        self.assertIn('for campo in fd.CAMPOS_CONTROLADOS:', APP)
-        self.assertIn('html.escape(str(procedencia), quote=True)', APP)
-        self.assertIn('fd.PRIORIDAD_FUENTES_POR_CAMPO', APP)
+        self.assertIn('for campo in aliases_area:', APP)
+        self.assertIn('html.escape(str(procedencia or fuente_aplicada or', APP)
+        self.assertIn('cuaderno-sin-fuente', APP)
+        self.assertIn('SIN FUENTE APLICADA', APP)
+        self.assertIn('pc.procedencia_campo(', APP)
         self.assertIn('cuaderno-fuente-seleccionada', APP)
         self.assertIn('Procedencia de campos documentales', APP)
 

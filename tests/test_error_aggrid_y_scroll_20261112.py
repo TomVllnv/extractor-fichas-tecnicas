@@ -42,10 +42,10 @@ def test_error_original_con_listas_anidadas_y_json_seguro():
 
 
 def test_analizar_sin_segundo_rerun_y_con_texto_reducido():
-    assert 'else "Analizar documento", type="primary", key="analyze_pdf"' in APP
+    assert 'st.button("Analizar documento", type="primary", key="analyze_pdf"' in APP
     assert 'Analizar documento activo' not in APP
     parte = APP.split('if iniciar_analisis:', 1)[1].split('elif not pdfs:', 1)[0]
-    assert 'st.success(f"Se analizaron' in parte
+    assert 'st.success(f"¡Se procesó correctamente el archivo' in parte
     # El clic dispara ya la ejecución que renderiza abajo la revisión.
     assert not re.search(r'^\s+st\.rerun\(\)\s*$', parte, flags=re.MULTILINE)
 

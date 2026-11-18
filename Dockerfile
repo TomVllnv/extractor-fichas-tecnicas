@@ -5,7 +5,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     HERRAMIENTA_BACKUP_DIR=/datos/respaldos
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 libglib2.0-0 libgomp1 && rm -rf /var/lib/apt/lists/*
+    libgl1 libglib2.0-0 libgomp1 \
+    tesseract-ocr tesseract-ocr-spa && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app

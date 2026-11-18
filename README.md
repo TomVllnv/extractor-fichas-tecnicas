@@ -13,6 +13,170 @@ Aplicación desarrollada con Python y Streamlit para extraer información de doc
 7. Selecciona el laboratorio de procesamiento, carga el PDF y pulsa **Analizar documento**.
 8. Descarga el Excel actualizado y revisa la información contra el documento original antes de utilizarla.
 
+## Instalación de Tesseract OCR para documentos escaneados (Windows)
+
+**Tesseract OCR** es una aplicación externa a Python. El archivo
+`requirements.txt` ya incluye `pytesseract>=0.3.10`, que permite llamarla desde
+Python, pero ejecutar `pip install -r requirements.txt` **no instala**
+`tesseract.exe` en Windows.
+
+1. Instala Tesseract OCR desde el instalador para Windows de
+   [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki). Puedes abrir
+   **PowerShell** y ejecutar `winget install --id UB-Mannheim.TesseractOCR -e`
+   o utilizar su instalador descargado manualmente.
+2. Durante la instalación, incluye los datos del idioma **español** (`spa`).
+   Si no aparecen como opción, consulta el apartado sobre archivos de idioma
+   `spa.traineddata` en la documentación de Tesseract. No se necesita instalar
+   todos los idiomas.
+3. La ubicación habitual es `C:\Program Files\Tesseract-OCR`. Si CMD no
+   reconoce `tesseract`, añade **esa carpeta** a las variables de entorno
+   de Windows (**Path**, sin añadir `tesseract.exe` al final), y cierra y
+   vuelve a abrir CMD y Streamlit.
+4. En un **CMD nuevo**, comprueba:
+
+   ```bat
+   tesseract --version
+   tesseract --list-langs
+   ```
+
+   La segunda orden debe listar `spa` (idealmente también `eng`). Si no aparece
+   `spa`, falta el paquete de idioma español; no basta con que Tesseract funcione.
+5. Desde la carpeta del proyecto, instala o verifica el puente Python y
+   ejecuta la aplicación como siempre:
+
+   ```bat
+   python -m pip install -r requirements.txt
+   python -c "import pytesseract; print(pytesseract.get_languages(config=''))"
+   streamlit run app.py
+   ```
+
+   El comando de Python también debe mostrar `spa`. Si el ejecutable no se
+   encuentra, revisa el **Path** y reinicia la terminal. La instalación de
+   Tesseract solo afecta la modalidad **Documentos escaneados**: la modalidad
+   **Fichas técnicas** conserva su análisis habitual.
+
+**Servidor Linux:** `packages.txt` contiene `tesseract-ocr` y
+`tesseract-ocr-spa` para alojamientos que instalan paquetes del sistema a partir
+ese archivo. El `Dockerfile` instala ambos de forma explícita para su contenedor.
+El motor del sistema **no se instala desde** `requirements.txt`.
+
+## Modalidades de análisis y revisión de cambios (16-11-2026)
+
+**Fichas técnicas:** conserva la extracción habitual de PDF con texto
+seleccionable y la cola individual. No ejecuta Tesseract ni RapidOCR; cuando
+se adjunta una ficha escaneada se recomienda la modalidad apropiada.
+
+**Documentos escaneados:** utiliza OCR Tesseract en español, con RapidOCR
+como respaldo, para reconocer páginas escaneadas y proponer información
+pertinente de manuales. Reconoce encabezados explícitos y también busca
+frases documentadas para otros campos, siempre con prioridad del apartado
+específico sobre frases incidentales de una sección diferente. Puede proponer
+recepción, procesamiento, muestra y recipiente, preparación, estabilidad,
+rechazo, valores de referencia, equipamiento y otros campos cuando exista
+texto identificable; no es una interpretación clínica automática universal.
+Las propuestas deben contrastarse con el manual original antes de guardarlas.
+Se conservan párrafos, listas y viñetas visibles en el OCR.
+
+Al cargar un PDF se examina si sus páginas tienen texto seleccionable,
+imágenes escaneadas o una combinación, sin realizar OCR. Cuando la modalidad
+parezca inadecuada se muestra un aviso orientativo; no se cambia la selección
+por el usuario automáticamente. Se permite escoger un intervalo de páginas.
+
+Las **Carteras del CRS y de Acreditación son opcionales** para comparar los
+datos del escaneo. Desde el 17-11-2026, **Escáner** tiene la primera prioridad
+para los campos que admiten esa procedencia; **Código** conserva su orden,
+así como los campos que no admiten Escáner. Una selección explícita de una
+fuente institucional prevalece sobre la propuesta de Escáner. Cuando existen
+valores diferentes se ofrece revisión de discrepancias sin descartar el original.
+
+El Excel anterior no se presenta como resultado nuevo. La tabla muestra
+únicamente los valores del análisis actual y los parámetros seleccionados.
+Al **desmarcar Aplicar** se visualiza el contenido que ya estaba en la hoja
+(con fondo naranja oscuro si existe), sin borrar ni editar el valor nuevo. Al
+marcar de nuevo reaparece la propuesta actual. El guardado respeta esta
+selección y conserva el valor anterior cuando la casilla está desmarcada.
+«Campos encontrados» no contabiliza valores antiguos en las filas desmarcadas.
+
+El campo **Referencias** no se completa automáticamente a partir de OCR,
+metadatos, nombre del archivo o fichas anteriores. Se puede generar una vista
+previa de referencias, pero solo entra como valor nuevo cuando se pulsa
+**Aplicar opción seleccionada a Referencias**. Si el libro anterior tiene
+referencias, quedan disponibles como valor antiguo mediante la casilla Aplicar.
+
+El modo convencional mantiene vacíos «Recepción de muestras» y «Procesamiento
+de muestras» si no son introducidos manualmente. El modo escaneado puede
+proponerlos cuando se identifican en el procedimiento. Ninguno vuelve a
+alimentarse del antiguo Manual de toma de muestras.
+
+Tesseract necesita el ejecutable y el idioma `spa` instalados en el sistema;
+`pytesseract` por sí solo no basta. En Windows consulta las instrucciones
+anteriores. La detección previa de escaneos no depende de Tesseract.
+
+## Mejoras de estabilidad, lectura y lenguaje (17-11-2026)
+
+- **Tabla:** el contenedor de Deshacer mantiene una altura reservada durante
+  el refresco de AG Grid para que la tabla no invada su espacio. El botón sigue
+  habilitándose al registrar la primera edición; Ctrl+Z se conserva.
+- **Estado:** la celda de una fila desmarcada con contenido previo muestra
+  **Valor anterior**; la leyenda naranja mantiene **Campo completado con valor
+  anterior**.
+- **Equipamiento:** se eliminan duplicados con diferencias de mayúsculas,
+  espacios o separadores para cualquier fabricante, conservando la escritura
+  encontrada. Las comparaciones se realizan por identificadores completos;
+  modelos con numeración distinta no se fusionan.
+- **Fechas de referencias:** una fecha de publicación, emisión, aprobación o
+  versión se utiliza solo si está acreditada en el contenido del PDF. El
+  nombre del archivo y la fecha de subida jamás se usan para asignar año.
+  Se reutiliza el texto ya reconocido de documentos escaneados. Si no hay
+  evidencia se mantiene **(s. f.)** y se recomienda verificación manual.
+- **Corrección lingüística conservadora:** solo en documentos escaneados, las
+  palabras del vocabulario clínico con errores evidentes de lectura óptica se
+  restauran sin alterar códigos, cifras, unidades, marcas o modelos desconocidos.
+  El texto bruto reconocido queda disponible en el estado temporal de sesión
+  para comprobaciones posteriores.
+- **Procedencia y lenguaje:** en pantalla, **Escáner** reemplaza a
+  «PDF importado (escaneado)»; «Lectura óptica» reemplaza a OCR y «Base de
+  datos» reemplaza a SQLite en las etiquetas explicativas. Los identificadores
+  técnicos internos no se renombran.
+
+Las mejoras de reconocimiento son conservadoras y no sustituyen la revisión
+humana de textos clínicos. El comportamiento visual debe validarse también en
+el navegador al desplegar una nueva versión.
+
+## Mejoras de descripción clínica y viñetas escaneadas (17-11-2026)
+
+- En **Documentos escaneados**, se repara únicamente el prefijo `e- `
+  confundido con una viñeta al comienzo de línea (incluida una viñeta
+  aislada en el renglón previo). Se conserva el símbolo `•` en la extracción
+  y en Excel. No se cambian los identificadores `e-123`, `e-mail` ni el texto
+  bruto guardado para comprobación.
+- La extracción de **Información clínica** reconoce también los apartados
+  **Características**, **Características del examen**, **Características de
+  la prueba** y **Descripción del examen/de la prueba**, tanto en manuales
+  escaneados como en manuales digitales identificados como tales. Cuando no
+  hay una sección específica, se buscan descripciones explícitas y útiles
+  del examen en la Introducción, sin inventar un resumen clínico.
+- **Información clínica** explícita tiene preferencia sobre **Características**;
+  ambas preceden a las frases descriptivas de la Introducción. Se descartan
+  calibraciones, instrucciones de reactivos y datos técnicos sin contenido
+  clínico. Si la evidencia es insuficiente, el campo se deja vacío.
+- No se cambian la prioridad de fuentes, las decisiones del usuario ni la
+  base de datos. Las propuestas siempre requieren revisión humana.
+
+## Modo claro y oscuro seleccionable (17-11-2026)
+
+- El archivo `.streamlit/config.toml` define dos variantes de apariencia:
+  **Claro**, con fondo blanco y texto oscuro; **Oscuro**, con los colores
+  neutros que se introdujeron el 13-11-2026.
+- El selector vuelve a estar disponible en el menú de Streamlit de la esquina
+  superior derecha (opciones Sistema, Claro y Oscuro).
+- Las variantes personalizadas requieren Streamlit 1.51 o superior; por ello,
+  `requirements.txt` especifica `streamlit>=1.51.0`.
+- El cambio es visual: no afecta documentos, extracciones, Excel, usuarios ni
+  bases de datos. Se debe validar la apariencia final en el navegador.
+- Al publicar, incluir `.streamlit/config.toml`, pero nunca
+  `.streamlit/secrets.toml`.
+
 ## Corrección de coincidencias y deshacer más ligero (12-11-2026)
 
 - **CRS y Acreditación:** ambas carteras utilizan el mismo porcentaje textual.
@@ -44,7 +208,7 @@ Aplicación desarrollada con Python y Streamlit para extraer información de doc
   únicamente en la sesión y para el examen activo; no revierte cambios ya
   guardados en SQLite. Dentro del editor de texto sigue operando el deshacer
   habitual del navegador.
-- Al cargar más de un PDF en la modalidad **Un PDF por examen**, antes de
+- Al cargar más de un PDF en la modalidad **Fichas técnicas**, antes de
   analizar cada documento aparece «Omitir este examen y pasar al siguiente».
   Omitir no genera una hoja, no actualiza ninguna base y no modifica el Excel
   consolidado de los exámenes anteriores. Si se omite el último PDF, se
@@ -145,14 +309,14 @@ antes de incorporarla y revisar los datos bibliográficos incompletos.
 
 ## Actualizar sin perder cuentas ni cambios (IMPORTANTE)
 
-**`Testeo.zip` contiene la carpeta `Testeo/` con todo el código, pero NO contiene `base_de_datos.db`.** Se excluye
+**`OCR.zip` contiene la carpeta `OCR/` con todo el código, pero NO contiene `base_de_datos.db`.** Se excluye
 intencionalmente para proteger las cuentas `ADMIN`, los otros encargados, sus
 contraseñas, documentos, fichas e historial de trazabilidad ya guardados.
 
 1. Detén Streamlit con `Ctrl + C` y respalda tu `base_de_datos.db` actual con la
    aplicación cerrada (y la carpeta `respaldos/`, si existe).
-2. Extrae `Testeo.zip` **en una carpeta temporal** (crea `Testeo/`).
-3. Copia los archivos de código y recursos de `Testeo/` sobre **la carpeta de la
+2. Extrae `OCR.zip` **en una carpeta temporal** (crea `OCR/`).
+3. Copia los archivos de código y recursos de `OCR/` sobre **la carpeta de la
    instalación que ya funciona y tiene tus cuentas**. No ejecutes otra carpeta
    recién descomprimida si allí no está tu base. **No borres ni reemplaces
    `base_de_datos.db`.** Si usas `HERRAMIENTA_DB_PATH`, conserva
@@ -385,9 +549,12 @@ Los laboratorios y encargados se almacenan únicamente en `base_de_datos.db`. De
 
 ## Dos modalidades de procesamiento PDF
 
-En la pestaña de extracción, selecciona **Un PDF por examen (cola actual)** para conservar el flujo anterior, o **Varios PDF para un mismo examen** para complementar una sola ficha con hasta cinco PDF. En este último modo, selecciona primero el examen y el laboratorio, carga los documentos y pulsa **Analizar todos los PDF del examen**.
+En la pestaña de extracción, **Modalidad de análisis** contiene:
 
-Cada PDF se extrae por separado. Los campos encontrados en documentos posteriores completan los campos vacíos del primero; si hay valores diferentes para un mismo campo, se muestran en la revisión para seleccionar el correcto y aplicar el cambio a la ficha Excel. La vista previa corresponde al primer archivo cargado. Los valores de la Cartera institucional siguen aplicándose con sus reglas existentes. Antes de actualizar la plantilla en la herramienta, se deben resolver las discrepancias entre PDF. Revisa siempre el Excel final con los documentos originales.
+- **Fichas técnicas:** extracción tradicional de PDF, manteniendo emparejamientos, cola y controles actuales.
+- **Documentos escaneados:** OCR con lectura de encabezados y extracción contextual de fragmentos comprobables. Propone valores nuevos y compara diferencias con las Carteras seleccionadas; el Excel anterior se consulta mediante «Aplicar».
+
+En ambas modalidades los PDF cargados se revisan **uno a uno** en la cola; se eliminó el antiguo modo de fusionar varios PDF del mismo examen. Antes de guardar se revisan las propuestas y las discrepancias. La sección **Procedencia de campos documentales** muestra **todos los campos en el orden de la tabla**, con fuentes institucionales de mayor a menor prioridad, PDF importado cuando realmente aportó contenido y el origen activo destacado en negrita. Para **Nombre LIS**, el origen real es el Administrador de exámenes (selección del usuario), no el OCR de un nombre que pudiera aparecer en el PDF. Las carteras y las normas mantienen sus precedencias.
 
 
 ## Fuentes documentales institucionales — actualización
@@ -398,9 +565,12 @@ Esta versión conserva la **Cartera de Exámenes** de SQLite y mantiene **dos fu
 2. **Cartera de Acreditación**: contiene **374 prestaciones** del documento `Cartera_Acreditacion_CRS_v0.2.3.xlsx`, incluida su columna **Prestación**, área y los seis pares de texto/estado. Se puede reemplazar desde el menú lateral por otra versión válida que conserve la hoja `Cartera_Completa` y los encabezados correspondientes.
 
 Los campos **Recepción de muestras** y **Procesamiento de muestras** siguen
-presentes en la ficha, pero ya no tienen alias de extracción ni origen en PDF,
-Normas, Carteras o Manual: permanecen vacíos por defecto. El usuario puede
-completarlos manualmente en la revisión si lo necesita. Al abrir esta versión
+presentes en la ficha y **no se alimentan** del antiguo Manual de toma de
+muestras, de las Carteras ni de Normas. Permanecen vacíos en el modo habitual
+de fichas técnicas. La modalidad **Documentos escaneados** puede proponer información respaldada
+por el documento para esos campos; si existe un valor previo, se podrá
+comparar desde «Aplicar». También se admiten ediciones manuales en los demás
+campos, salvo Referencias, que requiere confirmación bibliográfica. Al abrir esta versión
 con una SQLite anterior, se crea un respaldo y se retiran únicamente el PDF y
 los fragmentos del Manual almacenados; la tabla exclusiva `manual_toma_campos`
 también se elimina. **Las Normas generales permanecen intactas**, así como
@@ -422,8 +592,8 @@ En el menú lateral **Base de datos**, las fuentes aparecen en **Cartera de exá
 | Criterios de rechazo | **Normas Generales de Toma de Muestras** | Cartera de acreditación, si no hay un texto válido en Normas |
 | Muestra requerida y recipiente | Cartera de acreditación | Sin respaldo genérico |
 | Condiciones de envío al Laboratorio | Cartera de acreditación | Sin respaldo genérico |
-| Recepción de muestras | Sin extracción automática | Vacío por defecto; edición manual opcional |
-| Procesamiento de muestras | Sin extracción automática | Vacío por defecto; edición manual opcional |
+| Recepción de muestras | Manual de procedimiento seleccionado (apartado explícito) | Vacío en fichas técnicas y cuando el manual no lo documenta |
+| Procesamiento de muestras | Manual de procedimiento seleccionado (apartado explícito) | Vacío en fichas técnicas y cuando el manual no lo documenta |
 
 Para estos tres campos, una coincidencia válida de Acreditación **no reemplaza** el texto válido de Normas. Los demás campos mantienen sus prioridades anteriores.
 
@@ -601,7 +771,7 @@ transición en la versión de Streamlit instalada en el servidor.
 
 ## Actualización Test (9 de noviembre de 2026)
 
-El archivo **Test.zip** parte de la versión optimizada del 8 de noviembre y
+El archivo **OCR.zip** parte de la versión optimizada del 8 de noviembre y
 **no contiene base_de_datos.db**. Para actualizar una instalación existente,
 reemplazar los archivos de código conservando la base SQLite, usuarios,
 documentos, respaldos y secretos de la instalación.
@@ -641,3 +811,34 @@ no se modificó. Detalles y verificaciones en `CAMBIOS_TEST_2026-11-09.txt`.
   No se distribuyen macros VBA ni son necesarias para abrir los archivos `.xlsx`.
 - El proyecto no incluye base de datos SQLite en el ZIP. Nunca reemplazar una
   base activa por un archivo de demostración; conservar sus respaldos.
+
+## Reconocimiento de apartados homólogos en manuales (17-11-2026)
+
+Se reforzó la extracción de cinco campos: **Información clínica**,
+**Muestra requerida y recipiente**, **Procesamiento de muestras**,
+**Estabilidad de la muestra** y **Método de procesamiento**.
+
+- Se prioriza el apartado explícito del campo. Si falta, se buscan encabezados
+  equivalentes y, como respaldo, frases literales con evidencia contextual
+  inequívoca en secciones como **Introducción**, **Fundamento** y
+  **Descripción general**. Un mismo párrafo puede aportar frases distintas
+  a varios campos, sin copiarlo entero en cada uno.
+- Se rechazan como candidatos las menciones incidentales de conservación de
+  reactivos, preparación de calibradores, bibliografía y otros apartados no
+  relacionados. La información metodológica no se añade como información
+  clínica y las expresiones ambiguas dejan el campo sin completar.
+- **Documentos escaneados:** se usa el texto reconocido mediante lectura óptica;
+  no se repite la lectura para analizar los homólogos.
+- **Fichas técnicas (texto seleccionable):** el complemento se utiliza solo si
+  el propio documento puede identificarse inequívocamente como manual de
+  procedimiento. Las fichas de fabricante mantienen su análisis habitual. En
+  esta ruta, los dos campos normalmente controlados por fuentes institucionales
+  (muestra/recipiente y procesamiento) pueden recibir propuestas de un manual
+  explícito, pero la Cartera conserva su prioridad y la elección del usuario
+  prevalece. En el panel de procedencia, este PDF se indica solo en ese caso.
+- Se conservan los textos originales, la selección de fuentes y los valores
+  validados por el usuario. Todas las propuestas deben comprobarse contra el
+  documento original antes de guardarse.
+
+La extracción utiliza reglas contextuales verificables; no garantiza interpretar
+cualquier redacción clínica ni añade información externa al documento.

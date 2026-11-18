@@ -46,7 +46,7 @@ class TestVistaCompacta(unittest.TestCase):
 
     def test_visor_es_fragmento_y_solo_hay_flechas_laterales(self):
         self.assertIn('@st.fragment\ndef _visor_pdf_rapido', APP)
-        self.assertIn('_visor_pdf_rapido(pdf_activo, modo_conjunto, total_pdfs, pdfs_ordenados, idx_actual)', APP)
+        self.assertIn('_visor_pdf_rapido(pdf_activo, idx_actual)', APP)
         self.assertEqual(APP.count('st.button("❮"'), 1)
         self.assertEqual(APP.count('st.button("❯"'), 1)
         self.assertIn('pdf_preview_imagen_cache', APP)

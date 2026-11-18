@@ -23,7 +23,9 @@ def test_contador_se_renderiza_despues_de_recibir_los_cambios():
     asignacion = CODIGO.index('st.session_state["data_extracted"][field] = val_editado', grid)
     contador = CODIGO.index('espacio_campos_encontrados.metric(', asignacion)
     assert placeholder < grid < asignacion < contador
-    assert 'ht.contar_campos_encontrados(st.session_state.get("data_extracted", {}))' in CODIGO
+    # Solo las propuestas actuales marcadas cuentan en el indicador.
+    assert 'ht.contar_campos_encontrados({' in CODIGO
+    assert 'if seleccion_actual.get(campo, True)' in CODIGO
     assert ht.contar_campos_encontrados({"Estabilidad": "8 horas", "Equipo": "X"}) == 2
     assert ht.contar_campos_encontrados({"Estabilidad": "", "Equipo": "X"}) == 1
     assert ht.contar_campos_encontrados({"Estabilidad": "  ", "Equipo": "nan"}) == 0
