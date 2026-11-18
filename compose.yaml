@@ -1,0 +1,14 @@
+# Ejemplo de despliegue local; TI debe colocar un proxy HTTPS y controles de acceso.
+services:
+  herramienta:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8501:8501"
+    environment:
+      HERRAMIENTA_DB_PATH: /datos/base_de_datos.db
+      HERRAMIENTA_BACKUP_DIR: /datos/respaldos
+    volumes:
+      - laboratorio_datos:/datos
+volumes:
+  laboratorio_datos:
