@@ -1,0 +1,885 @@
+17-11-2026 — Revisión de estabilidad, duplicados y lenguaje.
+- Contenedor con altura estable para Deshacer antes de AG Grid.
+- Columna Estado: «Valor anterior»; leyenda naranja sin cambios.
+- Equipos: deduplicación y comparación universal conservadora por modelo.
+- Bibliografía: fechas del contenido (incluidos encabezados de versión y texto
+  de lectura óptica), nunca del nombre del archivo ni de la fecha de subida.
+- Corrección lingüística de lectura óptica limitada a vocabulario conocido;
+  sin modificar modelos ni datos numéricos.
+- Prioridad Escáner en Documentos escaneados salvo Código, campos excluidos
+  y decisiones explícitas del usuario.
+- Sustitución de OCR y SQLite en los textos para usuarios.
+
+17-11-2026 — Correcciones de viñetas y descripción clínica.
+- Lectura óptica: normalización localizada del error «e-» al iniciar una
+  viñeta; se mantienen códigos y texto bruto original.
+- Extracción de manuales: «Características» y «Descripción del examen»
+  se interpretan como secciones homólogas de Información clínica cuando
+  contienen descripciones del examen respaldadas por el contenido.
+- Una sección explícita Información clínica prevalece sobre Características;
+  la Introducción se aprovecha solo si aporta contenido clínico suficiente.
+- Se descartan calibraciones, reactivos y procedimientos técnicos del campo
+  clínico. Se añadió cobertura de regresión hasta exportación Excel.
+- Ningún cambio en prioridad de procedencias ni en la base de datos.
+
+UPDATES — HISTORIAL DE ACTUALIZACIONES
+Entradas ordenadas de la más antigua a la más reciente.
+En caso de diferencias, prevalece la actualización más reciente.
+
+----------------------------------------------------------
+Fecha: 2026-11-08
+Actualización: Interfaz y comportamiento del panel bibliográfico
+
+CAMBIOS REALIZADOS SOBRE TESTEO.ZIP - 08/11/2026
+================================================
+
+Archivos modificados
+- app.py: se quitaron los estilos redundantes del panel APA; se muestran
+  directamente los avisos bibliográficos; se memoizan los metadatos APA de
+  los PDF por contenido/nombre/examen; menor frecuencia del fragmento de
+  reinicio; descargas del sidebar sin rerun.
+- interfaz_fluida.py: una sola animación suave para el panel APA y
+  restauración puntual del desplazamiento; ocultación transitoria de
+  Bienvenida al seleccionar un área; observadores activos solamente durante
+  una acción conocida.
+- README.md: descripción de los cambios y forma de revertirlos.
+- tests/test_interfaz_fluida_scroll_y_giro.py y tests/test_reinicio_flotante.py:
+  expectativas actualizadas para el nuevo comportamiento.
+- tests/test_optimizacion_interfaz_noviembre.py: nuevas pruebas de regresión.
+
+Comportamiento que no se cambia
+- Lógica de extracción de datos, OCR, tratamiento de subíndices,
+  comparaciones con carteras, estructura del Excel generado, nombres LIS,
+  análisis de PDFs y escritura de la base de datos.
+- Selección APA: se mantienen las dos opciones, avisos, consentimiento para
+  reemplazar referencias editadas y escritura en el Excel.
+- Reinicio de la ficha: sigue requiriendo dos pulsaciones en 3 segundos.
+
+IMPORTANTE - NO REEMPLAZAR SQLITE
+Este paquete no contiene una base_de_datos.db de producción. Al instalar
+la nueva versión, conservar la base de datos activa y sus respaldos.
+No sustituir datos/ ni respaldos/ ni .streamlit/secrets.toml.
+
+Reversión
+El archivo Testeo_respaldo_original.zip, entregado junto al paquete,
+contiene exactamente el Testeo.zip recibido, sin modificaciones. Si deseas
+revertir, recuperar desde él solo el código anterior y reiniciar Streamlit.
+No se debe restaurar una copia antigua de SQLite en un sistema multiusuario.
+
+Verificación recomendada en la instalación real
+1. Iniciar sesión; seleccionar un área y confirmar que Bienvenida no se ve.
+2. Cargar un PDF de prueba (sin información de pacientes) y extraer datos.
+3. Abrir Referencias; aplicar cualquiera de las opciones; confirmar cierre
+   único, referencia correcta y conservación de la posición de la página.
+4. Comprobar las descargas, actualización con confirmación y reinicio doble.
+5. Comparar campos/Excel generados con la versión anterior usando el mismo
+   documento de prueba y la misma base de datos.
+
+Alcance de la comprobación local
+- Sintaxis Python y JavaScript validada.
+- Pruebas de regresión de interfaz y pruebas unitarias ejecutadas.
+- Simulación de navegador Chromium para clic APA y cambio desde Bienvenida:
+  sin errores JavaScript y sin clic duplicado.
+- Las pruebas históricas que requieren la base de datos de demostración no
+  pueden completarse porque esa base no estaba en el ZIP suministrado.
+- Se requiere validación visual final en Streamlit real tras desplegar.
+
+----------------------------------------------------------
+Fecha: 2026-11-09
+Actualización: Ajustes de Excel y pruebas iniciales
+
+ACTUALIZACIÓN DEL 9 DE NOVIEMBRE DE 2026 — TEST
+
+Origen: Testeo_optimizado_2026-11-08.zip. Este comprimido NO INCLUYE
+base_de_datos.db ni otros archivos SQLite. NO reemplazar la base de datos
+existente al copiar estos archivos en la instalación.
+
+1. EXCEL / ERROR DE REPARACIÓN EN sheet11.xml
+- Se comprueba cada cadena de todas las hojas, incluidas las enriquecidas
+  (cursivas APA y negritas de Normas), antes de permitir la descarga.
+- Se detectan y eliminan propiedades de fuente vacías heredadas de algunos
+  fragmentos enriquecidos sin eliminar su texto ni las negritas/cursivas válidas.
+- Se verifica el límite real de Excel (32.767 unidades UTF-16 por celda):
+  el XML puede ser válido y aun así superar ese límite. Si ocurre, la app
+  señala hoja y celda, no descarga un archivo potencialmente dañado y NO
+  recorta contenido clínico de forma silenciosa.
+- Se mantienen las revisiones de integridad ZIP, XML y carga de openpyxl.
+- Sin el XLSX exacto que informó el aviso, no es posible identificar con
+  certeza cuál de esas causas produjo la reparación en Windows.
+
+2. EMPAREJAMIENTOS CRS Y ACREDITACIÓN
+- Color según similitud desde rojo (55 %) a verde (100 %), atravesando
+  naranja, amarillo y amarillo verdoso.
+- El nombre completo del examen es un botón seleccionable; al pasar el
+  mouse sobre él cambia a fondo intenso y texto blanco.
+- Se mantiene el botón Seleccionar con el mismo color de la coincidencia.
+- Ambas opciones utilizan el mismo callback. También hay ambos controles
+  cuando solo existe una coincidencia sugerida.
+
+3. VISOR DE PDF
+- Flechas ❮ y ❯ a ambos lados de la página; desactivadas al inicio/fin.
+- Actualizan el slider de página del mismo PDF. En lotes, cada documento
+  conserva su propia página. No modifican extracción, OCR ni documentos.
+
+4. REFERENCIAS BIBLIOGRÁFICAS
+- El botón Aplicar ya no anima ni cierra automáticamente el expander.
+- El contenedor no cambia de identidad al confirmar; se conservan scroll y
+  elección de referencias. El usuario cierra el expander cuando lo desea.
+
+PRUEBAS
+- Se añadieron pruebas de límite UTF-16, propiedades vacías de texto rico,
+  gradiente, callbacks de coincidencia, flechas, y confirmación de referencias.
+- El proyecto incluye pruebas que dependen de una base de datos de ejemplo:
+  no deben interpretarse como falla de aplicación si no existe ese fixture.
+
+VERIFICACIÓN RECOMENDADA
+1. Probar el Excel con los mismos PDF y la misma base que mostraron el aviso.
+2. Confirmar en Microsoft Excel que ya no aparece aviso de reparación.
+3. Revisar nombres/campos, formato de viñetas y referencias APA.
+
+----------------------------------------------------------
+Fecha: 2026-11-09
+Actualización: Referencias bibliográficas y trazabilidad
+
+CAMBIOS DE REFERENCIAS Y TRAZABILIDAD - 09/11/2026
+=================================================
+
+1. RECONOCIMIENTO BIBLIOGRÁFICO RESTAURADO
+- Se recupera el título visible destacado de la primera página de cada PDF,
+  sin reemplazarlo automáticamente por el nombre del examen en la aplicación.
+- Se revisan primeras y últimas páginas del PDF para recuperar autor corporativo
+  Roche Diagnostics, año de copyright, domicilio editorial y sitio web,
+  exclusivamente si aparecen en el propio documento.
+- En PDFs Roche como el ejemplo de Fibrinogen, se extraen datos como
+  «2024, Roche Diagnostics», domicilio de Mannheim y www.roche.com.
+- El campo Referencias muestra estos datos al confirmar las fuentes.
+  No se incorporan a otros campos clínicos ni se guardan como metadatos globales.
+- Se elimina el descriptor generado por código «[Ficha técnica de EXAMEN]».
+- Si el título u otros metadatos no son detectables, se dejan provisionales;
+  no se inventan títulos, años ni editoriales.
+- Se cambia la clave de caché bibliográfica para recalcular referencias
+  previas al actualizar esta versión.
+
+2. MODO PRESENTACIÓN
+- No existe un interruptor «Modo presentación» en app.py de esta versión.
+- La trazabilidad institucional normal sigue visible y funcional en el panel.
+
+3. OPCIÓN SEGURA PARA PRESENTACIONES
+- El script opcional preparar_base_demostracion.py crea una COPIA del SQLite
+  vigente, mediante backup de SQLite, sin modificar el archivo original.
+- Solo en esa copia elimina las filas de auditoria_cambios y eventos_acceso.
+- El usuario debe ejecutar el script manualmente e iniciar Streamlit apuntando
+  a la copia con HERRAMIENTA_DB_PATH. Véase GUIA_TRAZABILIDAD.txt.
+- No incluye ni modifica la base de datos institucional real.
+
+PRUEBAS
+- 162 pruebas aprobadas y una omitida; se excluyeron pruebas que dependen
+  de la base institucional, ausente del paquete.
+- Se probó con PDF sintético Fibrinogen/Roche y con un PDF de otro examen.
+- Se comprobó que el backup de demostración conserva fichas y que la BD
+  original permanece intacta.
+- La revisión con el PDF original y la instancia real de Excel queda pendiente.
+
+----------------------------------------------------------
+Fecha: 2026-11-09
+Actualización: Consolidación de mejoras
+
+VERSIÓN CONSOLIDADA — 09-11-2026
+================================
+
+BASE: último Test.zip recibido en la conversación.
+RESTAURACIÓN SELECTIVA: componentes comprobados de Test_presentacion.zip.
+No se sustituyó el proyecto por una versión anterior completa.
+
+1. Coincidencias de CRS y acreditación
+   - Botones a la izquierda, dentro de una columna que ocupa hasta media página.
+   - Separación vertical compacta (0,28 rem), sin separadores horizontales.
+   - Una sola tarjeta clicable por coincidencia, con nombre, área y porcentaje.
+   - Color proporcional al porcentaje y fondo blanco al pasar el cursor.
+
+2. Vista previa de PDF
+   - Un fragmento Streamlit evita reconstruir toda la aplicación al cambiar de página.
+   - Caché de número de páginas y de imágenes (máximo 16), por contenido PDF.
+   - Se conservan únicamente las dos flechas laterales del documento y el deslizador.
+
+3. Discrepancias
+   - Tarjetas azul y verde directamente seleccionables.
+   - Cabeceras azul oscuro o verde oscuro sobre fondo claro.
+   - Solo «Valor extraído del PDF:» / «Valor en Cartera SQLite:».
+   - Sin repetición del nombre del campo en la tarjeta.
+   - Sin la etiqueta «Etapa 2» para PDF vs Cartera.
+
+4. Screentips (actualizado en la revisión de referencias)
+   - Sin temporizador de 4 segundos: se muestran al mantener el cursor
+     y se desactivan al salir del activador, sin animación de salida.
+   - Sin ayudas emergentes en los botones de descarga, actualización y avance.
+
+5. Conservado sin alteraciones respecto del último Test.zip
+   - bibliografía: título extraído de portada y datos editoriales Roche, sin etiquetas artificiales.
+   - Excel: texto plano, validación OOXML, altura variable según contenido.
+   - Confirmación de referencias sin cierre forzado del panel.
+   - Acceso, cuentas, trazabilidad real y utilidad opcional de base de demostración.
+   - Ningún interruptor «Modo presentación» en la interfaz.
+
+COMPROBACIONES
+  170 pruebas aprobadas, 1 omitida, 39 excluidas por requerir base institucional
+  (y/o su información de prueba). Compilación Python y verificación de ZIP.
+  Las bibliotecas de Streamlit no están disponibles en este entorno, por lo que
+  la visualización real del navegador y Microsoft Excel quedan por verificar
+  en la instalación final con documentos y plantillas institucionales.
+
+ARCHIVOS SQLite
+  No se incluye base_de_datos.db ni otros archivos SQLite.
+  No reemplaces tu base actual al actualizar código.
+
+----------------------------------------------------------
+Fecha: 2026-11-09
+Actualización: Referencias y tooltips
+
+CAMBIOS REFERENCIAS Y TOOLTIPS — 09-11-2026
+
+Esta edición parte de la última versión consolidada Test.zip.
+
+- Referencias de Roche: conservar autor, año, título visible y Roche Diagnostics GmbH;
+  excluir Sandhofer Strasse 116, D-68305 Mannheim del campo Referencias.
+- URL: mostrar dominio sin protocolo ni prefijo www. (ej.: roche.com).
+- Tooltips de Streamlit: se eliminó la animación que los ocultaba a los 4 s;
+  se desactivaron sus transiciones y la posibilidad de mantenerlos abiertos
+  al pasar el cursor sobre el propio mensaje.
+- Los botones Descargar Excel consolidado, Actualizar en base de datos y
+  Continuar al siguiente examen no tienen ayuda emergente.
+- No se modificaron las funciones de extracción clínica, escritura Excel,
+  navegación PDF, coincidencias ni lógica de trazabilidad.
+- No se incluye archivo de base de datos SQLite.
+- Caché bibliográfica versionada a v4 para no reutilizar referencias antiguas en sesión.
+
+----------------------------------------------------------
+Fecha: 2026-11-10
+Actualización: Cola, tooltips y rendimiento del scroll
+
+CAMBIOS — COLA, TOOLTIP Y DESPLAZAMIENTO — 10/11/2026
+=======================================================
+Base utilizada: Test.zip consolidado con cambios de referencias y tooltips.
+No se cambió la lógica de extracción, comparación, bibliografía ni exportación Excel.
+
+1. MENSAJE DE COLA
+- Si hay más de un PDF y se termina el último: «¡Has completado la cola de exámenes! Descarga o actualiza la documentación.»
+- Si hay exactamente un PDF: «¡Has completado el examen! Descarga o actualiza la documentación.»
+- El modo conjunto mantiene su aviso específico de ficha única.
+
+2. ACTUALIZAR BASE DE DATOS
+- Si hay discrepancias PDF o Cartera sin resolver, el botón se deshabilita y muestra: «Comprobar discrepancias antes de actualizar.»
+- Al desaparecer esas discrepancias se habilita y el tooltip deja de mostrarse.
+
+3. RENDIMIENTO DE SCROLL
+- Se eliminó @st.fragment(run_every=1.0) del control flotante: la aplicación ya no envía actualizaciones periódicas una vez por segundo por ese motivo.
+- Sigue siendo un fragmento: las pulsaciones actualizan el botón sin rehacer toda la aplicación.
+- Los 3 s de confirmación y el destello de 1,5 s se resuelven con el reloj de las pulsaciones y animación CSS finita.
+- Una nueva primera pulsación después del vencimiento reinicia la animación.
+- No se modificó interfaz_fluida.py ni la caché de páginas PDF.
+
+VALIDACIÓN
+- Compilación de app.py.
+- 174 pruebas automatizadas de módulos sin datos institucionales, 1 omitida; ningún fallo.
+- La batería completa requiere una base de prueba institucional ausente en el ZIP, por lo que no puede pasar íntegramente en este entorno.
+- La fluidez del scroll debe verificarse visualmente en el navegador de destino.
+
+PROTECCIÓN DE DATOS
+- ZIP sin archivos .db/.sqlite/.sqlite3 ni caches. Conservar la base existente al actualizar.
+
+----------------------------------------------------------
+Fecha: 2026-11-10
+Actualización: Posición del botón flotante
+
+AJUSTE DEL BOTÓN FLOTANTE — 10/11/2026
+Base: último Test.zip entregado el 10/11/2026.
+
+- El botón de reinicio se coloca 78 px sobre el borde inferior en escritorio y 96 px en pantallas pequeñas para despejar el control «Manage app» de Streamlit Cloud.
+- No se modifican la posición horizontal, el icono, el tamaño, la confirmación de dos pulsaciones ni las animaciones.
+- No cambia la extracción de documentos, la exportación Excel, las referencias bibliográficas, la interfaz de discrepancias ni la base de datos.
+- La apariencia exacta se debe comprobar en Streamlit Community Cloud; su barra es propia del servicio y podría cambiar en futuras versiones.
+
+----------------------------------------------------------
+Fecha: 2026-11-10
+Actualización: prioridad de Normas Generales, imagen de pestaña y registro único de cambios
+
+- Procedimiento de toma de muestras, Rotulación y Criterios de rechazo:
+  Normas Generales de Toma de Muestras > Cartera de acreditación.
+- La prioridad se aplica tanto al valor extraído como a su procedencia visual.
+- Acreditación se utiliza como respaldo si Normas no ofrece texto válido.
+- Preparación del paciente y los demás campos conservan sus prioridades anteriores.
+- Se corrigió el nombre de archivo de imagen a Pestaña.png en UTF-8,
+  coincidente con la referencia utilizada por app.py.
+- Se consolidaron los anteriores archivos CAMBIO(S)_*.txt en Updates.txt.
+- Se actualizaron las pruebas automatizadas y la tabla de prioridades del README.
+- No se incluyen bases de datos SQLite.
+
+
+----------------------------------------------------------
+Fecha: 2026-11-10
+Actualización: aceptación de «No aplica» en Preparación del paciente (Acreditación)
+
+- Se acepta «No aplica» y sus variantes «No aplicable», «N/A» y «NA»
+  cuando procedan de «Preparación del paciente · texto» de la Cartera de
+  Acreditación y tengan estado válido (Específico o Heredado).
+- Se mantiene la prioridad: Indicaciones CRS > Acreditación > Normas.
+- No se altera la exclusión de «No aplica» en Normas, ni la validación de
+  estados pendientes, avisos genéricos y textos por definir en Acreditación.
+- Se preservan las prioridades de los restantes campos.
+- Se añaden pruebas de regresión para valores aceptados, estados inválidos,
+  prioridades de procedencia y campos no afectados.
+- Sin cambios en la base de datos ni en las funciones de Excel y PDF.
+
+
+----------------------------------------------------------
+Fecha: 2026-11-10
+Actualización: Confirmación al cambiar de área, casillas de reemplazo y macro de Excel
+
+- Al cambiar de área, si existen archivos adjuntos o campos seleccionados /
+  completados, aparece un modal con botones Continuar (azul) y Cancelar (rojo).
+  Cancelar preserva el trabajo actual. Sin avances cambia de inmediato.
+- La tabla de extracción incluye una casilla ✔ marcada por defecto junto a cada
+  campo. Desmarcarla restaura el valor anterior de esa celda en el Excel
+  descargado y en la actualización SQLite, sin eliminar el nuevo valor en la
+  vista editable. En una hoja nueva, un campo desmarcado queda vacío.
+- Se reemplaza AutoajustarColumnas.bas por AutoajustarCampos.bas: autoajuste
+  primero de columnas y después de filas, con columnas largas limitadas.
+- Se centralizó la documentación de cambios en Updates.txt; ya no se incluyen
+  LEEME_PRIMERO_NO_REEMPLAZAR_SQLITE.txt, INSTRUCCIONES_ACTUALIZACION.txt
+  ni GUIA_TRAZABILIDAD.txt. El README conserva la guía vigente.
+- IMPORTANTE: nunca reemplazar la base SQLite real ni sus respaldos al
+  actualizar el código. El ZIP no contiene bases .db, .sqlite o .sqlite3.
+- La limpieza de tablas de auditoría de una base de pruebas es optativa, debe
+  hacerse con respaldo y nunca se ejecuta durante una actualización.
+- Para regresar a una versión anterior, restaurar exclusivamente archivos de
+  código y recursos, conservando la base institucional.
+
+----------------------------------------------------------
+2026-11-10
+- Se centraron los encabezados de la tabla de extracción y la columna de casillas pasó a llamarse "Aplicar".
+- Se corrigió la coincidencia entre campos de la tabla y etiquetas de Excel con dos puntos finales (por ejemplo, "Autorizado por:" y "Fecha actualización:").
+- Las casillas ahora afectan correctamente la descarga y la actualización cuando se conservan valores antiguos o se reemplazan por vacíos.
+
+----------------------------------------------------------
+Fecha: 2026-11-11
+- Se corrigió la escritura de los valores confirmados en «Comparación y Resolución de Discrepancias»: las decisiones explícitas se aplican al Excel aunque su estado de tabla sea «Encontrado».
+- Los encabezados «Campo» e «Información extraída» vuelven a alinearse a la izquierda; «Aplicar» y «Estado» permanecen centrados.
+- Tras escribir o restaurar campos se recalculan el ancho de columnas y el alto de filas del .xlsx generado. La macro AutoajustarCampos.bas sigue siendo opcional para Excel de escritorio y no se ejecuta sola al descargar un .xlsx.
+- La macro AutoajustarCampos.bas ahora opera sobre el libro activo (ActiveWorkbook), no sobre el archivo que almacena la macro (ThisWorkbook), para que pueda aplicarse al Excel extraído.
+
+----------------------------------------------------------
+11-11-2026
+- Trazabilidad: vista resumida de 5 registros y visor Fullscreen con 10 por página, ordenados de más nuevos a antiguos.
+- Administración de usuarios: modal ancho, pestaña Editar contraseña, cambio de usuario de acceso con comprobación de duplicados e invalidación de sesiones anteriores; advertencias naranjas para edición de usuario y contraseña.
+- Encabezado Base de datos sin (SQLite), aviso de Hematología retirado y texto del límite de caracteres eliminado de la tabla.
+- Etiquetas de campos del Excel generado sin dos puntos finales, con comparación compatible entre plantillas antiguas y nuevas.
+- Resumen de diferencias con encabezados legibles; enlaces automáticos de títulos e iconos de fullscreen de imágenes ocultos sin afectar tablas.
+
+----------------------------------------------------------
+Fecha: 2026-11-11
+- Información clínica: las viñetas que el PDF entrega separadas de su texto se vuelven a unir antes de exportar al Excel; se conservan el orden y los párrafos.
+- Trazabilidad: «Los cinco eventos más recientes» pasa a «Eventos recientes»; se aclara el significado de Revisión en el historial.
+- Las cuentas conservan y muestran la escritura exacta del nombre de acceso. Al iniciar sesión es necesario respetar las mayúsculas/minúsculas; no se cambian usuarios, contraseñas, unicidad de cuentas ni la base SQLite.
+- Administración de usuarios: los formularios ocupan aproximadamente la mitad del ancho del modal, mientras la tabla mantiene el ancho completo.
+- Hematología y coagulación: «Límite de detección» se completa solo cuando el PDF contiene un encabezado explícito y un valor con unidad (por ejemplo UEF/mL); si falta, no se infiere otro resultado.
+
+----------------------------------------------------------
+Fecha: 2026-11-11
+Actualización: Administración de usuarios, tablas y fechas
+- Administración de usuarios: modal de tamaño mediano, tabla con anchos explícitos para todos los encabezados y formularios alineados con ella.
+- Resumen de diferencias de base de datos: anchos mínimos para los encabezados Campo, Tipo de cambio, Valor anterior y Valor nuevo.
+- Fechas visibles en formato DD/MM/AAAA; nombres de archivos generados en DD-MM-AAAA (carácter / incompatible con Windows).
+- Se normalizan los nombres de fichas generadas en versiones anteriores cuando se descargan desde la base de datos, sin renombrar los registros originales almacenados.
+- Sin modificaciones en la extracción clínica ni en las tablas de SQLite.
+
+----------------------------------------------------------
+Fecha: 2026-11-11
+Actualización: Tabla de usuarios y Límite de detección en Hematología
+- La tabla de cuentas y los cuatro formularios comparten la mitad izquierda del modal, con anchos de columna más compactos; el modal no se estrecha.
+- Límite de detección en Hematología: se busca únicamente bajo el encabezado «Límites e intervalos», acepta unidades compuestas como «0,15 µg de UEF/mL» y saltos de línea entre etiqueta y valor.
+- No se confunde el límite de detección con Blanco, Cuantificación, rango de medición ni valores de otros apartados. No cambia la estructura SQLite ni el resto de los extractores.
+
+----------------------------------------------------------
+2026-11-11
+- Se rediseñó visualmente la ventana de Administración de usuarios: tabla y formularios comparten un ancho central y los formularios usan dos columnas con el orden solicitado.
+
+----------------------------------------------------------
+11/11/2026
+- Administración de usuarios: corregida la anidación de formularios dentro de sus cuatro pestañas independientes (Crear usuario, Editar usuario, Editar contraseña y Activar/desactivar). Ya no aparecen todos los formularios juntos.
+- Administración de usuarios: ampliado el modal, con la tabla de cinco columnas a ancho completo para leer todos sus encabezados y formularios centrados en dos columnas.
+- Se conserva el orden Usuario de acceso / Nombre visible; Contraseña / Repetir contraseña; Rol al final. No se modificó la lógica de usuarios ni la base SQLite.
+
+----------------------------------------------------------
+2026-11-11
+- AutoajustarCampos.bas recorre todas las hojas del libro activo, ajusta primero columnas y despues filas, con limites de ancho y control de errores.
+- La macro es opcional: los archivos .xlsx no ejecutan VBA y, para conservarla en el libro, se debe guardar como .xlsm.
+
+----------------------------------------------------------
+11/11/2026
+- En Hematología, la extracción clínica elimina membretes de página (códigos de documento, título repetido y subtítulo) atendiendo a su posición, sin eliminar la continuidad de las tablas ni los párrafos. El filtro se aplica al texto de entrada de TODOS los campos clínicos, no solamente Estabilidad.
+- Las Referencias bibliográficas permanecen independientes: siguen analizando los PDF originales con sus títulos y datos editoriales, sin este filtro clínico.
+- Las sugerencias de la Cartera de Exámenes priorizan coincidencias del nombre clínico antes que la similitud de caracteres y el área; los porcentajes no se inflan ni se realizan vínculos difusos automáticos.
+- Se añadieron pruebas de salto de página, OCR, referencias y ranking; se alineó una prueba de VBA con el uso actual de Application.ActiveWorkbook.
+
+----------------------------------------------------------
+11/11/2026
+- Emparejamiento de Cartera CRS: se recuperan hasta cinco sugerencias con al menos 55 % de similitud, filtrando antes de limitar la lista para no ocultar alternativas por parecido de nombre.
+- Se mantiene primero la coincidencia por nombre principal; las opciones difusas también pueden provenir de otras áreas. El área desempata los porcentajes, sin modificar sus valores ni realizar emparejamientos automáticos.
+
+----------------------------------------------------------
+11/11/2026
+- Se unificó el nombre de las fichas técnicas descargadas en el formato Ficha_Técnica_<Área>_Actualizada_DD-MM-AAAA.xlsx.
+- La fecha de la descarga del Excel generado corresponde a la última extracción exitosa de la sesión y no cambia si el usuario descarga el archivo posteriormente.
+- Al actualizar una ficha en SQLite se registra el mismo nombre y fecha de extracción. Las fichas históricas guardadas con otro patrón se renombran solo al descargarlas, sin alterar los registros originales; las plantillas importadas usan la fecha registrada en la base.
+- Solo cambia el nombre de los archivos; no se modifica el contenido Excel, la extracción ni la estructura SQLite.
+
+----------------------------------------------------------
+Fecha: 2026-11-11
+Actualización: Porcentajes de sugerencias según nombre clínico en la Cartera CRS
+- Se corrigió la diferencia entre el orden de candidatos y el porcentaje visible:
+  las variantes que contienen el nombre completo conservan un valor superior
+  al de otros exámenes solo parecidos por sus caracteres.
+- Criterio reproducible para dichas variantes: 75 % de similitud textual global
+  y 25 % de presencia íntegra del nombre clínico (en palabras completas).
+  Por ejemplo, PROTROMBINA (TP) 91 %, PROTROMBINA TACO NUEVO 75 %,
+  PROGESTERONA 70 %. No expresa probabilidad de equivalencia clínica.
+- Los candidatos difusos conservan su porcentaje anterior, el área solo
+  desempata, las sugerencias requieren elección manual y el vínculo exacto
+  no cambia. Sin alteraciones en los datos SQLite, PDF ni Excel.
+
+----------------------------------------------------------
+Fecha: 2026-11-12
+Actualización: Historial de edición, omisión segura, menú lateral y referencias
+- Tabla AG Grid: se incorpora un historial en la sesión para las últimas
+  20 acciones sobre «Información extraída». Permite deshacer/rehacer también
+  el borrado por Suprimir, después de abandonar la celda, mediante Ctrl+Z,
+  Ctrl+Y/Ctrl+Mayús+Z o botones visibles. Dentro del editor emergente se
+  mantiene el deshacer nativo de texto. Los valores restaurados se escriben
+  asimismo en el Excel consolidado, sin alterar SQLite ni los campos no
+  seleccionados con la casilla Aplicar.
+- Cola de varios exámenes: botón Omitir antes del análisis para cada PDF,
+  incluido el último. Omitir no analiza, no crea hojas ni modifica el Excel
+  existente; conserva todos los exámenes ya trabajados. Si se omite el
+  último, queda disponible la descarga y la actualización del consolidado
+  mediante confirmación y comparación de todas las hojas. Si todos los PDF
+  son omitidos, no se ofrece descargar/guardar una ficha inexistente.
+- Menú lateral: se retira el aviso largo sobre el cambio de área sin suprimir
+  la confirmación de seguridad. Examen activo aparece verde; en ausencia de
+  selección, «Sin seleccionar» se destaca en naranja.
+- Referencias: se incorpora un encabezado independiente «Referencias» y el
+  desplegable «Referencias bibliográficas» inicia abierto; después conserva
+  la posibilidad de abrirse/cerrarse normalmente.
+- Tal como se acordó anteriormente, se retira la macro opcional
+  AutoajustarCampos.bas y se actualiza el README. El ajuste del Excel sigue
+  realizándose desde Python, compatible con Windows y Linux.
+- Sin cambios en la extracción clínica, las reglas de emparejamiento, las
+  fuentes institucionales, las cuentas o la estructura de la base SQLite.
+
+----------------------------------------------------------
+Fecha: 2026-11-12
+Actualización: Sugerencias clínicas de la Cartera de Acreditación
+- Se corrige la búsqueda de coincidencias para que filtre por el umbral
+  de similitud (55 %) ANTES de limitar el resultado a cinco sugerencias.
+  Así no desaparecen prestaciones pertinentes detrás de los ocho primeros
+  nombres clasificados por parecido de letras.
+- Se reconocen palabras clínicas completas y distintivas como «lúpico»
+  o «circulantes», aun cuando aparezcan abreviaturas, calificadores o
+  diferencias importantes en la longitud de los nombres. Se preservan
+  sugerencias por semejanza textual como alternativa, sin convertir el
+  porcentaje en una probabilidad de equivalencia médica.
+- Si el usuario confirma un examen en la Cartera CRS, su nombre se utiliza
+  como referencia adicional para las sugerencias de Acreditación, junto
+  con el nombre del examen activo. Esto no modifica la selección exacta,
+  no vincula automáticamente la prestación ni cambia los datos extraídos.
+- El área solo se utiliza como criterio de desempate; nunca aumenta el
+  porcentaje de similitud. Se conservan la elección manual y los colores
+  habituales de las tarjetas. No se altera la estructura ni el contenido
+  de SQLite, el PDF, las fichas Excel o las funciones previas.
+- Se incorporan pruebas con nombres abreviados, términos compartidos,
+  una vinculación CRS ya confirmada y candidatos irrelevantes.
+
+----------------------------------------------------------
+Fecha: 2026-11-12
+Actualización: Retiro de Manual de toma y limpieza visual de trazabilidad
+- Se retira el Manual de toma de muestras de la administración de fuentes:
+  ya no hay pestaña, carga, descarga ni actualización del Manual.
+- En SQLite se elimina únicamente la fila del PDF del Manual y la tabla
+  heredada manual_toma_campos al iniciar con una base anterior. Antes se crea
+  automáticamente un respaldo; Normas generales, Carteras, fichas, usuarios y
+  registros de auditoría no se borran ni se modifican.
+- Los campos Recepción de muestras y Procesamiento de muestras permanecen en
+  las plantillas y en la revisión, pero no tienen alias PDF, ni se completan
+  desde fuentes institucionales. Su valor predeterminado es vacío; se admite
+  edición manual del usuario si necesita completarlos expresamente.
+- El panel de procedencia muestra esos dos campos sin fuente aplicada.
+- En Trazabilidad se retiran los subtítulos «Los cinco registros más
+  recientes. Revisión: versión del recurso tras guardar el cambio.» y
+  «Eventos recientes.». Se conservan las tablas, el Fullscreen y la auditoría.
+- Documentación y pruebas de regresión actualizadas.
+
+----------------------------------------------------------
+Fecha: 2026-11-12
+Actualización: Coincidencia clínica coherente y Ctrl+Z sin doble recarga
+- Las dos carteras comparten un cálculo de sugerencias: si el examen contiene
+  varias palabras, se pondera más la cobertura de la frase completa y se
+  atenúan los parecidos solo por caracteres sin palabras distintivas.
+  Caso AC. LUPICO: AC. CIRCULANTES O AC. LUPICO NUEVO alcanza 86 % y
+  ACIDO URICO queda en 53 % (bajo el umbral de sugerencias). No se cambian
+  equivalencias automáticas, vínculos confirmados, datos de SQLite ni
+  criterios de área; PROTROMBINA (TP) 91 %, TACO NUEVO 75 % y PROGESTERONA
+  70 % mantienen el resultado previo.
+- Ctrl+Z de AG Grid: se elimina el st.rerun() adicional y se restaura el
+  valor directamente en la tabla antes de comunicar UNA orden al servidor.
+  La orden oculta lleva un identificador único que se procesa una sola vez,
+  incluso si AG Grid conserva la fila después de una actualización.
+  El Excel recibe la restauración en esa misma ejecución.
+- Se retiran de la interfaz el botón Rehacer y los atajos Ctrl+Y y
+  Ctrl+Mayús+Z; el editor de texto sigue permitiendo su Ctrl+Z nativo.
+- La cola muestra «Documentos (arrastrar para ordenar)».
+- Pruebas sintéticas para ambos catálogos, prioridades, porcentajes,
+  recuperación por Suprimir y consumo único de comandos. No se distribuye
+  ni se modifica la base de datos institucional en el paquete.
+
+----------------------------------------------------------
+Fecha: 2026-11-12
+Actualización: Simplificación del mensaje para deshacer en revisión
+- Se reemplaza la explicación larga de Ctrl + Z por «Presionar Ctrl + Z para deshacer cambios».
+- La instrucción aparece dentro del mismo bloque de mensajes de «Aplicar» y edición de celdas,
+  con la misma tipografía y formato en negrita. Se elimina la leyenda aparte.
+- No cambian el historial de edición, los atajos, la extracción ni los archivos Excel.
+
+----------------------------------------------------------
+Fecha: 2026-11-12
+Actualización: Deshacer disponible desde la primera edición
+- Se corrige el botón «Deshacer» de la tabla: antes se renderizaba
+  deshabilitado al inicio del rerun, previo a incorporar el primer borrado
+  recibido de AG Grid. Ahora conserva su ubicación sobre la tabla,
+  pero calcula su estado una vez registrado el cambio.
+- Ctrl + Z captura además el valor anterior de la primera celda editada
+  directamente en el navegador, sin esperar el retorno del historial del
+  servidor; se bloquea repetir la misma orden mientras se sincroniza.
+- Se mantiene el límite de 20 cambios y el envío de una sola orden de
+  deshacer. No se reintroducen Ctrl + Y ni Rehacer.
+- Sin cambios en extracción, fuentes, fichas Excel, carteras ni SQLite.
+
+----------------------------------------------------------
+Fecha: 2026-11-12
+Actualización: Consejos de revisión con viñetas y énfasis selectivo
+- Las tres instrucciones de la tabla de revisión se muestran como una lista
+  con viñetas, en el mismo bloque y con idéntico color y tipografía.
+- Se actualizan literalmente los consejos de Aplicar, edición en Información
+  extraída y deshacer mediante Ctrl + Z o el botón Deshacer.
+- La negrita se limita a Aplicar, Información extraída, Ctrl + Z y Deshacer.
+- Sin cambios funcionales en la tabla, historial, PDF, Excel o SQLite.
+
+----------------------------------------------------------
+Fecha: 2026-11-12
+Actualización: Color exclusivo del nombre del examen activo
+- La etiqueta «Examen activo:» conserva el color predeterminado del texto
+  de la barra lateral; solo el nombre del examen aparece en verde.
+- Cuando no hay examen seleccionado, únicamente «Sin seleccionar»
+  se muestra en naranja.
+- No se modifica la lógica de selección, el resto del menú, la
+  extracción ni la base de datos.
+
+----------------------------------------------------------
+Fecha: 2026-11-12
+Actualización: Fiabilidad del atajo Ctrl+Z y menos recargas de la tabla
+- El atajo se escucha en fase de captura dentro del documento de AG Grid,
+  y no depende exclusivamente de que una celda tenga el foco preciso.
+  Se conserva el comportamiento nativo de Ctrl+Z al escribir en el editor.
+- Se eliminan los eventos adicionales generados por actualizar internamente
+  el estado visual (Encontrado/No encontrado/Modificado por usuario).
+- La tabla notifica a Streamlit únicamente cambios de valores, y no todos
+  los cambios del modelo de AG Grid. Esto reduce ejecuciones innecesarias
+  tras refrescos visuales. La sincronización legítima con Python y Excel
+  aún requiere una ejecución del servidor cuando se deshace una acción.
+- Se evita instalar varias escuchas del teclado cuando el grid se reabre.
+  El botón Deshacer, las casillas Aplicar y el límite de 20 acciones siguen
+  disponibles; no se reintroduce Ctrl+Y ni Rehacer.
+- Pruebas de regresión en Python y simulación JavaScript para el primer
+  borrado, la restauración, el editor, las teclas desactivadas y los
+  eventos duplicados. Requiere prueba de interacción en Streamlit real.
+- No se cambian los datos, la extracción, los emparejamientos ni SQLite.
+
+----------------------------------------------------------
+Fecha: 2026-11-12
+Actualización: Ctrl+Z más consistente y contador de campos sincronizado
+- El atajo utiliza un único manejador compartido por el documento de AG Grid
+  y su respaldo de evento de celda; así no duplica las órdenes de deshacer.
+- Se registra una pila temporal de hasta 20 ediciones en el navegador cuando
+  cambia realmente el valor. El primer Suprimir puede revertirse sin esperar
+  la respuesta de Streamlit; el historial del servidor continúa sincronizando
+  el Excel y la tabla.
+- En el editor de texto largo se mantiene el deshacer nativo; Ctrl+Y y
+  rehacer siguen deshabilitados. Ctrl+Z requiere foco en la tabla.
+- «Campos encontrados» conserva su ubicación pero se calcula al recibir los
+  valores ya editados de AG Grid, no antes de procesar el evento. Los textos
+  vacíos, espacios y marcadores nulos no cuentan como campos encontrados.
+- Pruebas JavaScript de primer borrado, cambios consecutivos, prevención de
+  eventos duplicados y editor nativo; regresiones Python de estado/contador.
+- No cambian la extracción, las carteras, la estructura de Excel ni SQLite.
+- Pendiente: prueba interactiva de las teclas en navegador/servidor real.
+
+----------------------------------------------------------
+Fecha: 2026-11-12
+Actualización: Reparación de AG Grid y conservación de posición al analizar
+- Se soluciona el TypeError «list indices must be integers or slices,
+  not dict» al convertir la pila anidada del historial de Ctrl + Z en
+  una cadena JSON dentro de las opciones de AG Grid. El navegador la
+  reconstruye al iniciar la tabla y conserva hasta 20 cambios.
+- Se añade una prueba que reproduce la estructura incompatible con
+  walk_gridOptions y valida su reemplazo, incluidos historiales existentes.
+- El botón individual se renombra de «Analizar documento activo» a
+  «Analizar documento»; el modo conjunto mantiene su etiqueta específica.
+- Se elimina el segundo st.rerun() al finalizar correctamente el análisis:
+  el resultado y la tabla ya se dibujan en la ejecución iniciada al pulsar
+  el botón, evitando una reconstrucción adicional de toda la página.
+- La navegación fluida registra la ubicación del botón de análisis y la
+  recupera después del resultado, sin mantener un observador permanente.
+  Los mecanismos para referencias, actualización y cambio de área se
+  conservan independientes.
+- No se altera la extracción, la tabla editable, el formato del Excel,
+  los emparejamientos ni SQLite; pruebas específicas Python y JavaScript.
+- Pendiente: comprobación interactiva del scroll en Streamlit real.
+
+----------------------------------------------------------
+Fecha: 2026-11-12
+Actualización: Botones de guardado centrados al finalizar una cola por omisión
+- Al omitir el último documento, siempre que existan fichas procesadas,
+  «Descargar Excel consolidado (.xlsx)» y «Actualizar en base de datos»
+  conservan los tipos de botón habituales (secundario y primario), el mismo
+  texto y el ancho de columna equivalente a «Opciones de guardado y avance
+  de cola», pero aparecen centrados con márgenes a ambos lados.
+- Solo el botón de actualización de la cola finalizada por omisión muestra
+  el aviso exacto «Deshabilitado por no comprobar discrepancias» cuando
+  existen discrepancias pendientes; el botón habitual no cambia su tooltip.
+  Si falta un Excel válido, se informa ese motivo por separado.
+- Se mantienen la descarga sin rerun, la confirmación previa al guardado,
+  el Excel consolidado existente y la regla de no crear una ficha si todos
+  los documentos se omiten sin procesar ninguno.
+- Pruebas específicas de estilo, anchura relativa, centrado y tooltip,
+  más regresiones generales independientes de la base institucional.
+- Sin cambios en extracción, emparejamientos ni base de datos SQLite.
+
+----------------------------------------------------------
+Fecha: 2026-11-12
+Actualización: Texto del tooltip de actualización tras omitir exámenes
+- El aviso del botón «Actualizar en base de datos» que aparece al terminar
+  una cola por omisión, cuando existen discrepancias pendientes, pasa a ser
+  «Deshabilitado por discrepancias sin analizar.»
+- No se altera el tooltip del botón habitual de guardado ni el
+  funcionamiento del guardado y la revisión de discrepancias.
+
+
+----------------------------------------------------------
+Fecha: 2026-11-12
+Actualización: Centrado del aviso al guardar avances tras omitir documentos
+- El mensaje informativo «Los exámenes procesados siguen en la ficha
+  consolidada. Omitir un PDF no altera ni borra los avances anteriores.»
+  aparece centrado horizontalmente encima de los dos botones de guardado.
+- El aviso conserva el estilo de st.info; se centra también su texto.
+- No se modifica la anchura, estilo ni funcionamiento de los botones,
+  ni la lógica de cola, Excel, extracción o base de datos.
+
+
+----------------------------------------------------------
+Fecha: 2026-11-12
+Actualización: Centrado del encabezado de guardado al omitir documentos
+- «Guardar avances de la cola» se centra horizontalmente sobre el aviso y
+  los botones de la finalización por omisión.
+- Se conserva el componente st.subheader, con su tipografía y tamaño original;
+  el estilo afecta únicamente a ese encabezado.
+- Sin modificaciones en el mensaje informativo, botones, extracción,
+  historial de revisión ni base de datos.
+
+----------------------------------------------------------
+Fecha: 2026-11-13
+Actualización: Unificación visual del tema oscuro entre Streamlit local y Cloud
+- Se incluye .streamlit/config.toml con una paleta oscura neutra (fondos
+  #0E1117 y #262730, texto #FAFAFA y acento #FF4B4B).
+- Se definen explícitamente los fondos de la barra lateral para evitar
+  diferencias entre plataformas y valores por defecto de Streamlit.
+- No se cambia app.py, las dependencias, las reglas de extracción, los
+  estilos particulares de la interfaz, el Excel ni SQLite.
+- No incluir .streamlit/secrets.toml al publicar el repositorio.
+
+----------------------------------------------------------
+Fecha: 2026-11-16
+Actualización: Lectura OCR única y progreso de PDF escaneados
+- El análisis de un PDF para la tabla de revisión ya no repite la lectura del
+  mismo documento al generar el Excel: process reutiliza los datos, el texto
+  y el método de extracción obtenidos en la primera pasada.
+- La optimización también se aplica a varios PDF de un mismo examen, sin
+  eliminar la revisión de discrepancias ni modificar el contenido extraído.
+- Al analizar un PDF individual se muestra el avance por página durante la
+  lectura y el reconocimiento OCR; se retira al terminar o al producirse error.
+- Se conserva el comportamiento anterior para llamadas directas a process y
+  para PDF digitales; no se altera SQLite, la edición ni los emparejamientos.
+- Validación automática independiente de la base institucional: 292 pruebas
+  aprobadas, 2 omitidas y 37 subpruebas aprobadas. La duración real de OCR
+  en Streamlit Community Cloud deberá comprobarse en el navegador.
+
+----------------------------------------------------------
+Fecha: 2026-11-16
+Actualización: Primera extracción conservadora de manuales de procedimiento escaneados
+- Se añadió «Manual de procedimiento del laboratorio» como tipo de documento
+  opcional; el modo habitual de fichas de fabricante continúa por defecto.
+- Los apartados numerados de recepción y preparación/procesamiento de muestras
+  se pueden identificar mediante texto OCR en manuales, sin reactivar el
+  antiguo Manual de toma de muestras ni afectar Normas generales o Carteras.
+- El manual solo propone valores para celdas vacías; conserva el contenido
+  previo de fichas validadas y sus metadatos. La tabla de revisión muestra
+  los valores existentes para evitar aparentes borrados.
+- Se añadió selección opcional del intervalo de páginas para acelerar pruebas
+  con manuales largos. El OCR de manuales ahora rasteriza a 160 dpi y envía
+  datos RGB directamente al motor, evitando la conversión PNG intermedia.
+- Se añadieron pruebas del parser, fuentes, Excel, preservación de datos,
+  intervalos de páginas y retorno OCR simulado. No se cambia SQLite.
+- Limitación: los encabezados ausentes o mal reconocidos por OCR no producen
+  valores automáticamente; el reconocimiento visual y rendimiento real en
+  Streamlit deben validarse con los documentos institucionales.
+
+----------------------------------------------------------
+Fecha: 2026-11-16
+Actualización: Corrección de extracción vacía en manuales escaneados
+- Se robusteció manuales_procedimiento.py para identificar encabezados de
+  «Recepción de muestras» y «Procesamiento de muestras» cuando RapidOCR
+  separa la numeración del título, altera puntos/comas o confunde caracteres.
+  Se reconocen títulos y contenido en un solo renglón; los límites de otros
+  apartados detienen la captura para no mezclar reactivos o procedimientos.
+- La interfaz incluye el «Diagnóstico de lectura del manual», con los campos
+  y encabezados que reconoció el OCR y descarga opcional de texto OCR (.txt).
+  Así es posible distinguir lectura fallida, encabezado no identificado y
+  datos ya ocupados que no se deben reemplazar.
+- Se corrigió un borrado accidental: al procesar manuales, un campo de
+  preparación/rotulación ya completado nunca queda en blanco solo porque
+  el manual no aporte un valor. La protección de valores PDF preextraídos
+  también se aplica si el OCR y el parser se ejecutan en fases separadas.
+- La lectura de fichas técnicas de fabricante, las prioridades de las fuentes
+  institucionales, las Carteras, SQLite y las cinco fichas validadas no se
+  modifican. Los manuales solo proponen valores para celdas vacías.
+- Se agregaron pruebas de títulos OCR con errores, encabezados en línea,
+  delimitación de secciones, guardado de Excel y conservación de campos
+  validados. No se incluye base de datos en Test.zip.
+- La ejecución del motor RapidOCR en Streamlit debe validarse en el entorno
+  del laboratorio. La lectura independiente por Tesseract de las páginas 5–6
+  del manual AC. LUPICO sí recuperó esos dos apartados con el parser nuevo.
+
+----------------------------------------------------------
+Fecha: 2026-11-16
+Actualización: Modalidad única, OCR mejorado en escaneos y procedencia completa
+- La sección «Modalidad de análisis» ofrece únicamente «Fichas técnicas» y
+  «Documentos escaneados». Se retira la selección separada de tipo documental
+  y se deja de ofrecer el análisis de varios PDF para una misma ficha.
+  La cola de PDF individuales y el botón «Analizar documento» permanecen.
+- Exclusivamente en Documentos escaneados: lectura OCR preferente con
+  Tesseract en español, si el sistema lo tiene instalado; respaldo RapidOCR
+  que conserva saltos de línea geométricos. El extractor reconstruye párrafos,
+  listas y viñetas reconocidas sin inventar términos clínicos ni separar
+  palabras por conjeturas. Fichas técnicas no cambia de motor ni reglas OCR.
+- Se agregan pytesseract en requirements.txt y Tesseract/español en
+  packages.txt para despliegues Linux compatibles. En Windows Tesseract
+  requiere instalar el ejecutable por separado; de lo contrario se usa
+  RapidOCR. Se mantiene la selección opcional del intervalo de páginas.
+- «Procedencia de campos documentales» lista todos los campos en idéntico
+  orden a la tabla de revisión; enumera fuentes según prioridad real y
+  resalta la que aportó el valor cuando está comprobada. Incluye PDF
+  importado, carteras, Normas, el Administrador de exámenes, datos anteriores
+  y entradas manuales según corresponda. Sin fuente: ninguna resaltada.
+- Las fuentes institucionales, fichas previamente validadas, historial,
+  exportación Excel, cuentas y SQLite no cambian de estructura.
+
+----------------------------------------------------------
+Fecha: 2026-11-16
+Actualización: Instalación de Tesseract OCR en Windows y Docker
+- Se ordenó requirements.txt y se señaló explícitamente que pytesseract
+  ya era una dependencia Python, sin duplicarla ni cambiar su versión mínima.
+  El ejecutable Tesseract no puede instalarse mediante pip.
+- README.md documenta la instalación para Windows, la selección del idioma
+  español, la configuración de Path y los comandos de verificación.
+- Dockerfile incorpora tesseract-ocr y tesseract-ocr-spa para que el modo
+  «Documentos escaneados» disponga del mismo motor OCR en el contenedor.
+  packages.txt ya contenía esos paquetes y permanece intacto.
+- No se modifica app.py, el análisis de fichas técnicas, SQLite ni los
+  algoritmos de extracción. Test.zip sigue excluyendo las bases de datos.
+
+
+----------------------------------------------------------
+Fecha: 2026-11-16
+Actualización: Simplificación de interfaz, procedencia y nombre del paquete
+- El paquete pasa a llamarse OCR.zip y su carpeta principal OCR/.
+- Se simplificó el tooltip de Modalidad de análisis y se renombró el desplegable
+  «Administrar parámetros operacionales».
+- Se retiraron las dos leyendas de instrucciones OCR y el panel desplegable
+  «Diagnóstico de lectura del documento escaneado». No se modifica el motor OCR,
+  su recuperación por páginas ni la extracción clínica.
+- En «Procedencia de campos documentales» se eliminaron los supuestos orígenes
+  «Edición manual» y «Ficha consolidada existente»; no constituyen fuentes
+  documentales verificadas. Se conservan las fuentes reales por campo y sus
+  prioridades, marcando solo valores con procedencia comprobable.
+- En el PDF escaneado se utiliza «PDF importado (escaneado)». El campo
+  «Referencias» ya no enumera «PDF importado» como fuente alternativa.
+- Cuando no se puede comprobar una fuente, se muestra el texto
+  «SIN FUENTE APLICADA», en mayúsculas y rojo tenue, sin paréntesis.
+- Se conservan Normas generales, Carteras, Excel y SQLite sin alteración;
+  el archivo OCR.zip no incluye base de datos institucional.
+
+----------------------------------------------------------
+Fecha: 2026-11-16
+Actualización: OCR exclusivo, detección de escaneos y revisión de valores anteriores
+- «Fichas técnicas» deja de ejecutar motores OCR. La modalidad «Documentos
+  escaneados» conserva Tesseract/RapidOCR e incorpora clasificación contextual
+  prudente de frases clínicas, subordinada a los encabezados del manual.
+- Al adjuntar un PDF, PyMuPDF identifica orientativamente texto, imágenes
+  escaneadas o contenido mixto y muestra un aviso sin cambiar la modalidad.
+- Las Carteras seleccionadas siguen siendo opcionales; sus propuestas tienen
+  prioridad inicial, reiniciando el selector al analizar otro documento. Si su
+  contenido discrepa del OCR, la comparación conserva
+  ambos valores para que el usuario escoja antes de actualizar la base.
+- La tabla deja de copiar datos antiguos del Excel como resultados nuevos.
+  «Aplicar» marcada muestra la propuesta actual; desmarcada muestra el valor
+  anterior en naranja oscuro (si existe), sin destruir el valor nuevo ni su
+  historial. El contador no toma las filas que muestran valores anteriores.
+- «Referencias» solo recibe una propuesta nueva mediante confirmación en el
+  panel APA; el OCR y la extracción normal no la completan automáticamente.
+- En Procedencia de campos se reconoce el OCR como fuente también en campos
+  sujetos a prioridad institucional, solo cuando realmente aportó el valor.
+- Se simplificó el texto de Procedencia y se retiró el aviso de propuestas
+  documentales indicado por el usuario.
+- Pruebas adaptadas a la separación de datos anteriores y nuevas; se añadieron
+  casos de detección sin OCR, comparación de fuentes, encabezados, párrafos,
+  referencias y colores. No se modifica el esquema de SQLite.
+- OCR.zip incluye solo el código y los recursos, sin ninguna base SQLite.
+
+----------------------------------------------------------
+Fecha: 2026-11-17
+Actualización: Restitución del selector de modo claro y oscuro
+- Se reemplaza el tema oscuro único por variantes [theme.dark] y [theme.light].
+- El modo oscuro conserva sus colores neutros, y el modo claro usa una paleta
+  de alto contraste con fondo blanco y texto oscuro.
+- Se requiere Streamlit >= 1.51.0 para la selección entre variantes.
+- No se modifican la extracción, los formularios, las fuentes ni la base de datos.
+
+----------------------------------------------------------
+Fecha: 2026-11-17
+Actualización: Paleta azul marino y aviso legible de campos reconocidos
+- El modo oscuro utiliza fondo azul marino (#101D2D), paneles azul pizarra
+  (#1D3047) y barra lateral azul profundo (#16283E), con texto claro.
+- Los controles que dependen del acento del tema usan azul moderado
+  (#76A9D4), en armonía con los botones azules existentes.
+- Se mantiene sin cambios la configuración de colores del modo claro.
+- En el aviso «El manual permitió reconocer los siguientes campos», los
+  nombres se distinguen con texto blanco sobre etiquetas azul oscuro,
+  sin alterar otros avisos ni el contenido reconocido.
+- Sin modificaciones en extracción, procedencias, almacenamiento o datos.
+- El archivo entregado conserva la carpeta OCR y excluye archivos de BD.
+
+
+17-11-2026 — Referencias de temperatura para Derivados.
+- Lectura de tablas referenciales horizontales o verticales en PDF digital o
+  mediante texto de lectura óptica.
+- Complemento conservador de Estabilidad de la muestra con la condición
+  identificada para ese examen, sin equiparar transporte y estabilidad.
+- Nuevo límite de sección «Tabla de Temperaturas» para evitar arrastre de texto.
+- Sin cambios en prioridades, temas, otros extractores ni almacenamiento.

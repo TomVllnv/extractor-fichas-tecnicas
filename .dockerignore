@@ -1,0 +1,35 @@
+# Archivos locales, credenciales y datos institucionales que NUNCA
+# deben incorporarse al contexto de build ni a la imagen Docker.
+.git
+.git/
+.gitignore
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+**/secrets.toml
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.pytest_cache/
+.venv/
+venv/
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite-*
+**/*.sqlite3
+**/*.sqlite3-*
+datos/
+respaldos/
+backups/
+*.zip
+*.pdf
+*.xlsx
+# Único libro institucional de carga inicial permitido en la imagen; no es SQLite.
+!recursos_iniciales/Homologacion_de_test.xlsx
+*.xls
+*.csv
+*.log
+tests/
